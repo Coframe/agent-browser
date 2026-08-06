@@ -1,18 +1,64 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use futures_util::{SinkExt, StreamExt};
+#[cfg(not(target_arch = "wasm32"))]
+use futures_util::SinkExt;
+use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::Message;
 
 use super::types::{CdpCommand, CdpEvent, CdpMessage};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+
+/// Incoming message from a CDP transport, decoupled from any specific
+/// WebSocket implementation.
+#[derive(Debug)]
+pub enum TransportEvent {
+    Text(String),
+    Close(Option<String>),
+    Error(String),
+}
+
+/// Outgoing half of a CDP transport. Implemented by tokio-tungstenite on
+/// native targets; other runtimes (e.g. Cloudflare Workers) supply their own.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+pub trait CdpTransportSink: Send + Sync {
+    async fn send_text(&self, text: String) -> Result<(), String>;
+
+    /// Send a protocol-level ping frame. Transports without ping support
+    /// treat this as a no-op.
+    async fn send_ping(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+pub trait CdpTransportSink {
+    async fn send_text(&self, text: String) -> Result<(), String>;
+
+    /// Send a protocol-level ping frame. Transports without ping support
+    /// treat this as a no-op.
+    async fn send_ping(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type TransportEventStream = Pin<Box<dyn Stream<Item = TransportEvent> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub type TransportEventStream = Pin<Box<dyn Stream<Item = TransportEvent>>>;
 
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
@@ -27,22 +73,13 @@ pub struct RawCdpMessage {
 }
 
 pub struct CdpClient {
-    ws_tx: Arc<
-        Mutex<
-            futures_util::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                >,
-                Message,
-            >,
-        >,
-    >,
+    ws_tx: Arc<dyn CdpTransportSink>,
     next_id: AtomicU64,
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
-    _reader_handle: tokio::task::JoinHandle<()>,
-    _keepalive_handle: tokio::task::JoinHandle<()>,
+    _reader_handle: crate::rt::JoinHandle<()>,
+    _keepalive_handle: crate::rt::JoinHandle<()>,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -62,19 +99,78 @@ impl Drop for PendingGuard {
         }
         let pending = self.pending.clone();
         let id = self.id;
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 pending.lock().await.remove(&id);
             });
         }
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            pending.lock().await.remove(&id);
+        });
+    }
+}
+
+/// tokio-tungstenite implementation of the transport sink used on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+struct TungsteniteSink {
+    tx: Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+    >,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl CdpTransportSink for TungsteniteSink {
+    async fn send_text(&self, text: String) -> Result<(), String> {
+        let mut tx = self.tx.lock().await;
+        tx.send(Message::Text(text))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_ping(&self) -> Result<(), String> {
+        let mut tx = self.tx.lock().await;
+        tx.send(Message::Ping(Vec::new()))
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
 impl CdpClient {
+    #[cfg(target_arch = "wasm32")]
+    pub async fn connect(_url: &str) -> Result<Self, String> {
+        Err(
+            "direct WebSocket connect is not supported on this platform; \
+             construct the client with CdpClient::from_transport"
+                .to_string(),
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn connect_with_headers(
+        _url: &str,
+        _headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        Err(
+            "direct WebSocket connect is not supported on this platform; \
+             construct the client with CdpClient::from_transport"
+                .to_string(),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn connect(url: &str) -> Result<Self, String> {
         Self::connect_with_headers(url, None).await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn connect_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
@@ -108,8 +204,40 @@ impl CdpClient {
 
         enable_tcp_keepalive(ws_stream.get_ref());
 
-        let (ws_tx, mut ws_rx) = ws_stream.split();
-        let ws_tx = Arc::new(Mutex::new(ws_tx));
+        let (ws_tx, ws_rx) = ws_stream.split();
+
+        // Accept both Text and Binary frames — remote CDP proxies
+        // (e.g. Browserless) may send responses as Binary frames.
+        let events: TransportEventStream = Box::pin(ws_rx.filter_map(|msg| async move {
+            match msg {
+                Ok(Message::Text(text)) => Some(TransportEvent::Text(text)),
+                Ok(Message::Binary(data)) => String::from_utf8(data).ok().map(TransportEvent::Text),
+                Ok(Message::Close(frame)) => Some(TransportEvent::Close(
+                    frame
+                        .as_ref()
+                        .map(|f| format!("code={}, reason={}", f.code, f.reason)),
+                )),
+                Ok(_) => None,
+                Err(e) => Some(TransportEvent::Error(e.to_string())),
+            }
+        }));
+
+        Ok(Self::from_transport(
+            Arc::new(TungsteniteSink {
+                tx: Mutex::new(ws_tx),
+            }),
+            events,
+        ))
+    }
+
+    /// Build a client on top of an already-established transport. This is the
+    /// runtime-injection seam: any WebSocket-like transport that can deliver
+    /// text frames works, regardless of the underlying platform.
+    pub fn from_transport(
+        sink: Arc<dyn CdpTransportSink>,
+        mut events: TransportEventStream,
+    ) -> Self {
+        let ws_tx = sink;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (event_tx, _) = broadcast::channel(4096);
@@ -122,30 +250,19 @@ impl CdpClient {
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
 
-        let reader_handle = tokio::spawn(async move {
-            while let Some(msg) = ws_rx.next().await {
-                // Accept both Text and Binary frames — remote CDP proxies
-                // (e.g. Browserless) may send responses as Binary frames.
-                let msg = match msg {
-                    Ok(Message::Text(text)) => text,
-                    Ok(Message::Binary(data)) => match String::from_utf8(data) {
-                        Ok(text) => text,
-                        Err(_) => continue,
-                    },
-                    Ok(Message::Close(frame)) => {
+        let reader_handle = crate::rt::spawn(async move {
+            while let Some(event) = events.next().await {
+                let msg = match event {
+                    TransportEvent::Text(text) => text,
+                    TransportEvent::Close(reason) => {
                         if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
-                            let reason = frame
-                                .as_ref()
-                                .map(|f| format!("code={}, reason={}", f.code, f.reason))
-                                .unwrap_or_else(|| "no frame".to_string());
+                            let reason = reason.unwrap_or_else(|| "no frame".to_string());
                             let _ =
                                 writeln!(std::io::stderr(), "[cdp] WebSocket Close: {}", reason);
                         }
                         break;
                     }
-                    Ok(Message::Pong(_)) => continue,
-                    Ok(_) => continue,
-                    Err(e) => {
+                    TransportEvent::Error(e) => {
                         if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
                             let _ = writeln!(std::io::stderr(), "[cdp] WebSocket Error: {}", e);
                         }
@@ -203,21 +320,20 @@ impl CdpClient {
         // cloud load balancers) from closing idle WebSocket connections. If the
         // send fails, the connection is dead and we stop pinging.
         let keepalive_tx = ws_tx.clone();
-        let keepalive_handle = tokio::spawn(async move {
+        let keepalive_handle = crate::rt::spawn(async move {
             let interval = std::time::Duration::from_secs(WS_KEEPALIVE_INTERVAL_SECS);
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
+                    _ = crate::rt::sleep(interval) => {}
                     _ = cancel_rx.changed() => break,
                 }
-                let mut tx = keepalive_tx.lock().await;
-                if tx.send(Message::Ping(Vec::new())).await.is_err() {
+                if keepalive_tx.send_ping().await.is_err() {
                     break;
                 }
             }
         });
 
-        Ok(Self {
+        Self {
             ws_tx,
             next_id: AtomicU64::new(1),
             pending,
@@ -225,7 +341,7 @@ impl CdpClient {
             raw_tx,
             _reader_handle: reader_handle,
             _keepalive_handle: keepalive_handle,
-        })
+        }
     }
 
     pub async fn send_command(
@@ -260,15 +376,12 @@ impl CdpClient {
             done: false,
         };
 
-        {
-            let mut ws_tx = self.ws_tx.lock().await;
-            ws_tx
-                .send(Message::Text(json))
-                .await
-                .map_err(|e| format!("Failed to send CDP command: {}", e))?;
-        }
+        self.ws_tx
+            .send_text(json)
+            .await
+            .map_err(|e| format!("Failed to send CDP command: {}", e))?;
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match crate::rt::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(resp)) => {
                 guard.done = true;
                 resp
@@ -355,9 +468,8 @@ impl CdpClient {
         let json = serde_json::to_string(&cmd)
             .map_err(|e| format!("Failed to serialize CDP command: {}", e))?;
 
-        let mut ws_tx = self.ws_tx.lock().await;
-        ws_tx
-            .send(Message::Text(json))
+        self.ws_tx
+            .send_text(json)
             .await
             .map_err(|e| format!("Failed to send CDP command: {}", e))
     }
@@ -365,9 +477,8 @@ impl CdpClient {
     /// Send raw JSON through the WebSocket without tracking a response.
     /// Used by the inspect proxy to forward DevTools frontend messages.
     pub async fn send_raw(&self, json: String) -> Result<(), String> {
-        let mut ws_tx = self.ws_tx.lock().await;
-        ws_tx
-            .send(Message::Text(json))
+        self.ws_tx
+            .send_text(json)
             .await
             .map_err(|e| format!("Failed to send raw CDP message: {}", e))
     }
@@ -380,29 +491,17 @@ impl CdpClient {
     }
 }
 
-type WsTx = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            Message,
-        >,
-    >,
->;
-
 /// Lightweight handle for the inspect WebSocket proxy, holding only
 /// the cloneable parts of CdpClient needed for bidirectional message forwarding.
 pub struct InspectProxyHandle {
-    ws_tx: WsTx,
+    ws_tx: Arc<dyn CdpTransportSink>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
 }
 
 impl InspectProxyHandle {
     pub async fn send_raw(&self, json: String) -> Result<(), String> {
-        let mut ws_tx = self.ws_tx.lock().await;
-        ws_tx
-            .send(Message::Text(json))
+        self.ws_tx
+            .send_text(json)
             .await
             .map_err(|e| format!("Failed to send raw CDP message: {}", e))
     }
@@ -415,6 +514,7 @@ impl InspectProxyHandle {
 /// Enable TCP SO_KEEPALIVE on the underlying socket of a WebSocket connection.
 /// This is best-effort: failures are silently ignored since the WebSocket-level
 /// Ping keepalive provides the primary connection liveness mechanism.
+#[cfg(not(target_arch = "wasm32"))]
 fn enable_tcp_keepalive(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
     let tcp_stream = match stream {
         tokio_tungstenite::MaybeTlsStream::Plain(s) => s,

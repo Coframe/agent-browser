@@ -302,6 +302,7 @@ pub enum WaitUntil {
 }
 
 impl WaitUntil {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
@@ -423,7 +424,7 @@ impl BrowserManager {
                 (url, BrowserProcess::Lightpanda(lp))
             }
             _ => {
-                let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
+                let chrome = crate::rt::spawn_blocking(move || launch_chrome(&options))
                     .await
                     .map_err(|e| format!("Chrome launch task failed: {}", e))??;
                 let url = chrome.ws_url.clone();
@@ -747,7 +748,7 @@ impl BrowserManager {
     /// `timeout_ms`. A discarded tab keeps its CDP session but has no
     /// renderer to reply (#1528). A CDP error still counts as responding.
     async fn renderer_responds(&self, session_id: &str, timeout_ms: u64) -> bool {
-        tokio::time::timeout(
+        crate::rt::timeout(
             Duration::from_millis(timeout_ms),
             self.client.send_command(
                 "Runtime.evaluate",
@@ -782,7 +783,7 @@ impl BrowserManager {
         if dialog_session == Some(session_id) {
             return Ok(RendererState::DialogBlocked);
         }
-        match tokio::time::timeout(
+        match crate::rt::timeout(
             Duration::from_millis(REVIVED_RENDERER_TIMEOUT_MS),
             self.client.send_command(
                 "Target.activateTarget",
@@ -944,9 +945,9 @@ impl BrowserManager {
             WaitUntil::None => return Ok(()),
         };
 
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+        let timeout = crate::rt::Duration::from_millis(self.default_timeout_ms);
 
-        tokio::time::timeout(timeout, async {
+        crate::rt::timeout(timeout, async {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -971,7 +972,7 @@ impl BrowserManager {
         session_id: &str,
         rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+        let timeout = crate::rt::Duration::from_millis(self.default_timeout_ms);
         poll_network_idle(session_id, rx, timeout).await
     }
 
@@ -1085,7 +1086,7 @@ impl BrowserManager {
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
-            let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::rt::spawn_blocking(move || {
                 process.wait_or_kill(timeout);
             })
             .await;
@@ -1105,8 +1106,8 @@ impl BrowserManager {
     /// Checks if the CDP connection is alive by sending a simple command.
     /// Returns false if the command times out or fails.
     pub async fn is_connection_alive(&self) -> bool {
-        let timeout = tokio::time::Duration::from_secs(3);
-        let result = tokio::time::timeout(
+        let timeout = crate::rt::Duration::from_secs(3);
+        let result = crate::rt::timeout(
             timeout,
             self.client
                 .send_command_no_params("Browser.getVersion", None),
@@ -1839,16 +1840,16 @@ impl BrowserManager {
 async fn poll_network_idle(
     session_id: &str,
     rx: &mut broadcast::Receiver<CdpEvent>,
-    overall_timeout: tokio::time::Duration,
+    overall_timeout: crate::rt::Duration,
 ) -> Result<(), String> {
     let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
 
-    tokio::time::timeout(overall_timeout, async {
-        let mut idle_start: Option<tokio::time::Instant> = None;
+    crate::rt::timeout(overall_timeout, async {
+        let mut idle_start: Option<crate::rt::Instant> = None;
 
         loop {
             let recv_result =
-                tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
+                crate::rt::timeout(crate::rt::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
                 Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
@@ -1866,12 +1867,12 @@ async fn poll_network_idle(
                             {
                                 p.remove(id);
                                 if p.is_empty() {
-                                    idle_start = Some(tokio::time::Instant::now());
+                                    idle_start = Some(crate::rt::Instant::now());
                                 }
                             }
                         }
                         "Page.loadEventFired" if p.is_empty() => {
-                            idle_start = Some(tokio::time::Instant::now());
+                            idle_start = Some(crate::rt::Instant::now());
                         }
                         _ => {}
                     }
@@ -1887,13 +1888,13 @@ async fn poll_network_idle(
                     // has already loaded (e.g. cached pages).
                     let p = pending.lock().await;
                     if p.is_empty() && idle_start.is_none() {
-                        idle_start = Some(tokio::time::Instant::now());
+                        idle_start = Some(crate::rt::Instant::now());
                     }
                 }
             }
 
             if let Some(start) = idle_start {
-                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                if start.elapsed() >= crate::rt::Duration::from_millis(500) {
                     return Ok(());
                 }
             }
@@ -1922,7 +1923,7 @@ async fn connect_cdp_with_retry(
             }
         }
 
-        tokio::time::sleep(poll_interval).await;
+        crate::rt::sleep(poll_interval).await;
     }
 }
 
@@ -1946,7 +1947,7 @@ async fn initialize_lightpanda_manager(
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
                 }
-                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                crate::rt::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
                 continue;
             }
         };
@@ -1975,7 +1976,7 @@ async fn initialize_lightpanda_manager(
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
                 }
-                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                crate::rt::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
             }
         }
     }
@@ -2008,7 +2009,7 @@ where
     let remaining = remaining_until(deadline)
         .ok_or_else(|| lightpanda_target_init_timeout(Some("deadline expired before retry")))?;
 
-    match tokio::time::timeout(remaining, operation).await {
+    match crate::rt::timeout(remaining, operation).await {
         Ok(result) => result,
         Err(_) => Err(lightpanda_target_init_timeout(Some(timeout_context))),
     }
@@ -2067,7 +2068,7 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::sleep;
+    use crate::rt::sleep;
 
     #[test]
     fn test_format_tab_id() {
@@ -2382,7 +2383,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_with_lightpanda_deadline_enforces_timeout() {
         let deadline = Instant::now() + Duration::from_millis(25);
-        let err = tokio::time::timeout(
+        let err = crate::rt::timeout(
             Duration::from_secs(1),
             run_with_lightpanda_deadline(
                 deadline,
@@ -2474,8 +2475,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
         let session = "s1";
 
-        let start = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
+        let start = crate::rt::Instant::now();
+        let result = crate::rt::timeout(
             Duration::from_secs(5),
             poll_network_idle(session, &mut rx, Duration::from_secs(5)),
         )
@@ -2501,7 +2502,7 @@ mod tests {
         let session = "s1";
 
         let _keep_alive = tx.clone();
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             sleep(Duration::from_millis(50)).await;
             let _ = tx.send(cdp_event(
                 "Network.requestWillBeSent",
@@ -2516,8 +2517,8 @@ mod tests {
             ));
         });
 
-        let start = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
+        let start = crate::rt::Instant::now();
+        let result = crate::rt::timeout(
             Duration::from_secs(5),
             poll_network_idle(session, &mut rx, Duration::from_secs(5)),
         )
@@ -2540,7 +2541,7 @@ mod tests {
         let session = "s1";
 
         let _keep_alive = tx.clone();
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             sleep(Duration::from_millis(50)).await;
             let _ = tx.send(cdp_event(
                 "Network.requestWillBeSent",
@@ -2568,8 +2569,8 @@ mod tests {
             ));
         });
 
-        let start = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
+        let start = crate::rt::Instant::now();
+        let result = crate::rt::timeout(
             Duration::from_secs(5),
             poll_network_idle(session, &mut rx, Duration::from_secs(5)),
         )
@@ -2594,7 +2595,7 @@ mod tests {
         let session = "s1";
 
         // Keep sending requests so idle is never reached
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             for i in 0u64.. {
                 let _ = tx.send(cdp_event(
                     "Network.requestWillBeSent",
@@ -2630,7 +2631,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut tx, mut rx) = ws.split();
@@ -2719,7 +2720,7 @@ mod tests {
         assert_eq!(mgr.pages.len(), 2);
         assert_eq!(mgr.active_page_index, 0);
 
-        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
+        let result = crate::rt::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang on a discarded tab")
             .expect("switching to a discarded tab should revive it");
@@ -2742,7 +2743,7 @@ mod tests {
         let url = start_mock_cdp_browser_with_discarded_tab(false).await;
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
 
-        let err = tokio::time::timeout(Duration::from_secs(25), mgr.tab_switch(1, None))
+        let err = crate::rt::timeout(Duration::from_secs(25), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang on a dead tab")
             .expect_err("switching to an unrevivable tab should fail");
@@ -2777,7 +2778,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut tx, mut rx) = ws.split();
@@ -2841,7 +2842,7 @@ mod tests {
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
         assert_eq!(mgr.pages.len(), 2);
 
-        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
+        let result = crate::rt::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang")
             .expect("switching to a responsive tab should succeed");
@@ -2864,13 +2865,13 @@ mod tests {
         let url = start_mock_cdp_browser_with_discarded_tab(true).await;
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
 
-        let _ = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
+        let _ = crate::rt::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang")
             .expect("switching to a discarded tab should revive it");
 
         // Cleanup runs on the guard's drop via a spawned task; let it settle.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        crate::rt::sleep(Duration::from_millis(200)).await;
 
         assert_eq!(
             mgr.client.pending_len().await,
@@ -2900,7 +2901,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut tx, mut rx) = ws.split();
@@ -2969,7 +2970,7 @@ mod tests {
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
         assert_eq!(mgr.pages.len(), 2);
 
-        let result = tokio::time::timeout(
+        let result = crate::rt::timeout(
             Duration::from_secs(20),
             mgr.tab_switch(1, Some("S-T-BLOCKED")),
         )
@@ -3005,7 +3006,7 @@ mod tests {
         assert_eq!(mgr.active_page_index, 0);
 
         // Close the live active tab; the discarded tab becomes the successor.
-        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_close(Some(0), None))
+        let result = crate::rt::timeout(Duration::from_secs(20), mgr.tab_close(Some(0), None))
             .await
             .expect("tab_close must not hang on a discarded successor")
             .expect("closing a tab with a discarded successor should succeed");
@@ -3029,7 +3030,7 @@ mod tests {
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
         assert_eq!(mgr.pages.len(), 2);
 
-        let result = tokio::time::timeout(Duration::from_secs(25), mgr.tab_close(Some(0), None))
+        let result = crate::rt::timeout(Duration::from_secs(25), mgr.tab_close(Some(0), None))
             .await
             .expect("tab_close must not hang")
             .expect("a committed close must report success even if the successor is dead");
@@ -3091,7 +3092,7 @@ mod tests {
             .map(|(id, _)| format!("S-{}", id))
             .collect();
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut tx, mut rx) = ws.split();
@@ -3164,7 +3165,7 @@ mod tests {
         let (url, activations) =
             start_mock_cdp_connect(vec![("DISCARDED", false), ("ALIVE", true)], false).await;
 
-        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
+        let mgr = crate::rt::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
             .await
             .expect("connect must not hang on a discarded first target")
             .expect("connect should succeed by selecting the live tab");
@@ -3195,7 +3196,7 @@ mod tests {
         let targets: Vec<(&'static str, bool)> = ids.iter().map(|id| (*id, true)).collect();
         let (url, activations) = start_mock_cdp_connect(targets, false).await;
 
-        let mgr = tokio::time::timeout(Duration::from_secs(5), BrowserManager::connect_cdp(&url))
+        let mgr = crate::rt::timeout(Duration::from_secs(5), BrowserManager::connect_cdp(&url))
             .await
             .expect("connect with many live tabs must stay fast")
             .expect("connect should succeed");
@@ -3219,7 +3220,7 @@ mod tests {
     async fn test_connect_all_discarded_revives_first_tab() {
         let (url, activations) = start_mock_cdp_connect(vec![("ONLY", false)], true).await;
 
-        let mgr = tokio::time::timeout(Duration::from_secs(20), BrowserManager::connect_cdp(&url))
+        let mgr = crate::rt::timeout(Duration::from_secs(20), BrowserManager::connect_cdp(&url))
             .await
             .expect("connect must not hang when all tabs are discarded")
             .expect("connect should succeed after reviving the only tab");
@@ -3237,10 +3238,9 @@ mod tests {
     async fn test_connect_all_discarded_unrevivable_fails_fast() {
         let (url, _activations) = start_mock_cdp_connect(vec![("ONLY", false)], false).await;
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(30), BrowserManager::connect_cdp(&url))
-                .await
-                .expect("connect must not hang on an unrevivable discarded tab");
+        let result = crate::rt::timeout(Duration::from_secs(30), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect must not hang on an unrevivable discarded tab");
 
         match result {
             Ok(_) => panic!("connect should fail when no tab can be made live"),
@@ -3264,7 +3264,7 @@ mod tests {
         )
         .await;
 
-        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
+        let mgr = crate::rt::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
             .await
             .expect("connect must not hang")
             .expect("connect should select the live tab");
@@ -3274,7 +3274,7 @@ mod tests {
         );
 
         // Drop-guard cleanup runs on a spawned task; let it settle.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        crate::rt::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             mgr.client.pending_len().await,
             0,
