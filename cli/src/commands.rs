@@ -61,14 +61,21 @@ impl ParseError {
 }
 
 pub fn gen_id() -> String {
-    format!(
-        "r{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            % 1000000
-    )
+    format!("r{}", now_micros() % 1000000)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_micros() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros()
+}
+
+// SystemTime::now is unsupported and panics on wasm32-unknown-unknown.
+#[cfg(target_arch = "wasm32")]
+fn now_micros() -> u128 {
+    (js_sys::Date::now() * 1000.0) as u128
 }
 
 /// Normalize browser navigation inputs while preserving schemes Chrome can
