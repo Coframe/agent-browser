@@ -1,20 +1,7 @@
-mod chat;
-mod color;
-mod commands;
-mod connection;
-mod doctor;
-mod flags;
-mod install;
-mod mcp;
-mod native;
-mod output;
-mod plugins;
-mod read;
-mod skills;
-#[cfg(test)]
-mod test_utils;
-mod upgrade;
-mod validation;
+use agent_browser::{
+    chat, color, commands, connection, doctor, flags, install, mcp, native, output, plugins, read,
+    skills, upgrade, validation,
+};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -393,7 +380,7 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
 }
 
 fn run_profiles(json_mode: bool) {
-    use crate::native::cdp::chrome::{find_chrome_user_data_dir, list_chrome_profiles};
+    use native::cdp::chrome::{find_chrome_user_data_dir, list_chrome_profiles};
 
     let user_data_dir = match find_chrome_user_data_dir() {
         Some(dir) => dir,
@@ -1987,11 +1974,11 @@ mod tests {
 
     #[test]
     fn test_attach_plugins_to_command_adds_registry_payload() {
-        let plugins = vec![crate::plugins::PluginConfig {
+        let plugins = vec![plugins::PluginConfig {
             name: "stealth".to_string(),
             command: "agent-browser-plugin-stealth".to_string(),
             capabilities: vec!["launch.mutate".to_string()],
-            ..crate::plugins::PluginConfig::default()
+            ..plugins::PluginConfig::default()
         }];
         let mut cmd = json!({ "action": "navigate", "url": "https://example.com" });
 
