@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::Message;
 
 use super::types::BrowserVersionInfo;
@@ -81,7 +83,7 @@ async fn fetch_cdp_info(
 ) -> Result<BrowserVersionInfo, String> {
     let url = format!("http://{}:{}/json/version", bracket_ipv6(host), port);
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url))
+    let body = crate::rt::timeout(timeout, reqwest_get_string(&url))
         .await
         .map_err(|_| format!("Timeout connecting to CDP at {}:{}", host, port))?
         .map_err(|e| format!("Failed to connect to CDP at {}:{}: {}", host, port, e))?;
@@ -131,7 +133,7 @@ fn append_query(url: &str, query: Option<&str>) -> String {
 async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
     let url = format!("http://{}:{}/json/list", bracket_ipv6(host), port);
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url))
+    let body = crate::rt::timeout(timeout, reqwest_get_string(&url))
         .await
         .map_err(|_| format!("Timeout connecting to /json/list at {}:{}", host, port))?
         .map_err(|e| {
@@ -161,6 +163,12 @@ async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<Stri
 /// Discover a CDP endpoint by connecting directly to `ws://host:port/devtools/browser`
 /// and verifying it responds to `Browser.getVersion`.
 /// Returns the WebSocket URL on success.
+#[cfg(target_arch = "wasm32")]
+async fn discover_cdp_ws(_host: &str, _port: u16, _timeout: Duration) -> Result<String, String> {
+    Err("direct WebSocket discovery is not supported on this platform".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
     let ws_url = format!("ws://{}:{}/devtools/browser", bracket_ipv6(host), port);
 

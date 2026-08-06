@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+#[cfg(any(unix, windows))]
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -183,6 +184,11 @@ pub fn cleanup_stale_files(session: &str) {
 /// so we don't mis-clean a live daemon owned by a different uid. Only ESRCH
 /// ("no such process") is treated as dead.
 pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
     #[cfg(unix)]
     unsafe {
         if libc::kill(pid as i32, 0) == 0 {
@@ -397,6 +403,11 @@ pub fn resolve_port(session: &str) -> u16 {
 }
 
 pub fn daemon_ready(session: &str) -> bool {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = session;
+        false
+    }
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
@@ -465,6 +476,7 @@ pub struct DaemonOptions<'a> {
     pub plugins: Option<&'a str>,
 }
 
+#[cfg(any(unix, windows))]
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     cmd.env("AGENT_BROWSER_DAEMON", "1")
         .env("AGENT_BROWSER_SESSION", session);
@@ -704,6 +716,7 @@ fn daemon_version_matches(session: &str) -> bool {
 }
 
 /// Kill a running daemon by reading its PID file and sending a kill signal.
+#[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
 fn kill_stale_daemon(session: &str) {
     // Remove the socket first so no new connections reach the old daemon
     #[cfg(unix)]
@@ -780,6 +793,7 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+#[cfg_attr(not(any(unix, windows)), allow(unused_variables, unused_mut))]
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
@@ -980,11 +994,18 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     );
     #[cfg(windows)]
     let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
+    #[cfg(not(any(unix, windows)))]
+    let endpoint_info = "no daemon endpoint on this platform".to_string();
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = session;
+        Err("daemon connections are not supported on this platform".to_string())
+    }
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);

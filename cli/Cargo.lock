@@ -57,6 +57,7 @@ dependencies = [
  "hex",
  "hmac",
  "image",
+ "js-sys",
  "libc",
  "reqwest",
  "rust-embed",
@@ -72,6 +73,8 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "windows-sys 0.52.0",
  "zip",
 ]

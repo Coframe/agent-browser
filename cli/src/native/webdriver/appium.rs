@@ -152,6 +152,12 @@ impl Drop for AppiumManager {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn is_appium_running(_port: u16) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn is_appium_running(port: u16) -> bool {
     let addr = format!("127.0.0.1:{}", port);
     tokio::time::timeout(
@@ -190,15 +196,15 @@ fn launch_appium(port: u16) -> Result<Child, String> {
 }
 
 async fn wait_for_appium(port: u16, timeout_secs: u64) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = crate::rt::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if tokio::time::Instant::now() > deadline {
+        if crate::rt::Instant::now() > deadline {
             return Err("Timeout waiting for Appium to start".to_string());
         }
         if is_appium_running(port).await {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        crate::rt::sleep(Duration::from_millis(500)).await;
     }
 }
 

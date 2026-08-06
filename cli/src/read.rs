@@ -1,3 +1,6 @@
+// Most of this module supports the native-only run_read implementation below.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
+
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
@@ -186,6 +189,15 @@ struct LlmsLink {
     url: Url,
 }
 
+/// The read command requires a client-level timeout and a redirect policy
+/// that re-validates every hop against the domain allowlist; reqwest's wasm
+/// backend supports neither, so the command is native-only.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_read(_raw_url: &str, _options: ReadOptions) -> Result<Value, String> {
+    Err("the read command is not supported on this platform".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, String> {
     let target = normalize_url(raw_url)?;
     check_allowed_url_for_options(&target, &options)?;

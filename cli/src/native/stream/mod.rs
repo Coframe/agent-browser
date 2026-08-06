@@ -1,17 +1,25 @@
 mod cdp_loop;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod chat;
+#[cfg(not(target_arch = "wasm32"))]
 mod dashboard;
+#[cfg(not(target_arch = "wasm32"))]
 mod discovery;
+#[cfg(not(target_arch = "wasm32"))]
 mod http;
+#[cfg(not(target_arch = "wasm32"))]
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
+#[cfg(not(target_arch = "wasm32"))]
 pub use dashboard::run_dashboard_server;
 
+use crate::rt::Instant;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
@@ -121,7 +129,7 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 /// The timestamp lets the idle-shutdown path re-check activity after waiting
 /// for a command to release the daemon state lock. The notification wakes the
 /// timer promptly for ordinary command and dashboard activity.
-pub(crate) struct IdleActivity {
+pub struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
 }
@@ -199,8 +207,8 @@ pub struct StreamServer {
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     shutdown_tx: watch::Sender<bool>,
-    accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    cdp_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    accept_task: Mutex<Option<crate::rt::JoinHandle<()>>>,
+    cdp_task: Mutex<Option<crate::rt::JoinHandle<()>>>,
 }
 
 impl StreamServer {
@@ -305,6 +313,18 @@ impl StreamServer {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    async fn start_inner(
+        _preferred_port: u16,
+        _client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+        _session_id: String,
+        _allow_port_fallback: bool,
+        _idle_activity: Arc<IdleActivity>,
+    ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
+        Err("stream server is not supported on this platform".to_string())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn start_inner(
         preferred_port: u16,
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,

@@ -297,7 +297,7 @@ pub async fn type_text_into_active_context(
         }
 
         if delay > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(delay)).await;
         }
     }
 

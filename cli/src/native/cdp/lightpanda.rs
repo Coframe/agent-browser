@@ -237,7 +237,7 @@ async fn wait_for_lightpanda_ready(
     logs: &LaunchLogBuffer,
     startup_timeout: Duration,
 ) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + startup_timeout;
+    let deadline = crate::rt::Instant::now() + startup_timeout;
     let mut last_probe_error = None;
 
     loop {
@@ -246,7 +246,7 @@ async fn wait_for_lightpanda_ready(
             // before we snapshot them.  This is best-effort: lines written just
             // before exit may still be missing, but the most useful output (early
             // startup errors) will already be in the buffer.
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            crate::rt::sleep(Duration::from_millis(25)).await;
             return Err(lightpanda_launch_error(
                 &format!(
                     "Lightpanda exited before CDP became ready (status: {})",
@@ -264,7 +264,7 @@ async fn wait_for_lightpanda_ready(
             Err(err) => last_probe_error = Some(err),
         }
 
-        if std::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(lightpanda_launch_error(
                 &format!(
                     "Timed out after {}ms waiting for Lightpanda CDP endpoint on port {}",
@@ -276,7 +276,7 @@ async fn wait_for_lightpanda_ready(
             ));
         }
 
-        tokio::time::sleep(LIGHTPANDA_POLL_INTERVAL).await;
+        crate::rt::sleep(LIGHTPANDA_POLL_INTERVAL).await;
     }
 }
 

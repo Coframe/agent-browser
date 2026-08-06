@@ -29,6 +29,12 @@ pub struct TracingState {
     pub events_dropped: bool,
 }
 
+impl Default for TracingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TracingState {
     pub fn new() -> Self {
         Self {
@@ -89,10 +95,10 @@ pub async fn trace_stop(
     let mut trace_events: Vec<Value> = Vec::new();
     let mut stream_handle: Option<String> = None;
 
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_secs(30);
 
     loop {
-        let result = tokio::time::timeout_at(deadline, rx.recv()).await;
+        let result = crate::rt::timeout_at(deadline, rx.recv()).await;
 
         match result {
             Ok(Ok(event)) => {
@@ -236,10 +242,10 @@ pub async fn profiler_stop(
 
     let mut events: Vec<Value> = Vec::new();
     let mut dropped = false;
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_secs(30);
 
     loop {
-        let result = tokio::time::timeout_at(deadline, rx.recv()).await;
+        let result = crate::rt::timeout_at(deadline, rx.recv()).await;
 
         match result {
             Ok(Ok(event)) => {

@@ -1,0 +1,24 @@
+pub mod artifacts;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod chat;
+pub mod color;
+pub mod commands;
+pub mod connection;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod doctor;
+pub mod flags;
+pub mod install;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mcp;
+pub mod native;
+pub mod output;
+pub mod plugins;
+pub mod read;
+pub mod rt;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod skills;
+#[cfg(test)]
+pub mod test_utils;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod upgrade;
+pub mod validation;

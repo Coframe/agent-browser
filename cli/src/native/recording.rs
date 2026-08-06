@@ -1,24 +1,36 @@
 use serde_json::{json, Value};
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use super::cdp::client::CdpClient;
+#[cfg(not(target_arch = "wasm32"))]
 use super::cdp::types::{CaptureScreenshotParams, CaptureScreenshotResult};
 
+#[cfg(not(target_arch = "wasm32"))]
 const CAPTURE_INTERVAL_MS: u64 = 100;
+#[cfg(not(target_arch = "wasm32"))]
 const CAPTURE_FPS: u32 = 10;
 
 pub struct RecordingState {
     pub active: bool,
     pub output_path: String,
     pub frame_count: u64,
-    pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    pub capture_task: Option<crate::rt::JoinHandle<Result<(), String>>>,
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
+}
+
+impl Default for RecordingState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecordingState {
@@ -79,6 +91,7 @@ pub fn recording_restart(state: &mut RecordingState, path: &str) -> Result<Value
     }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("ffmpeg");
 
@@ -122,13 +135,27 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
 
 /// Spawn a background task that captures screenshots at a fixed interval
 /// and pipes them to ffmpeg in real-time.
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_recording_task(
+    _client: Arc<CdpClient>,
+    _session_id: String,
+    _output_path: String,
+    _shared_count: Arc<AtomicU64>,
+    _cancel_rx: oneshot::Receiver<()>,
+) -> crate::rt::JoinHandle<Result<(), String>> {
+    crate::rt::spawn(
+        async move { Err("video recording is not supported on this platform".to_string()) },
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     session_id: String,
     output_path: String,
     shared_count: Arc<AtomicU64>,
     cancel_rx: oneshot::Receiver<()>,
-) -> tokio::task::JoinHandle<Result<(), String>> {
+) -> crate::rt::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
         let mut cancel_rx = std::pin::pin!(cancel_rx);
 

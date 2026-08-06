@@ -583,6 +583,12 @@ pub struct EventTracker {
     pub max_entries: usize,
 }
 
+impl Default for EventTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventTracker {
     pub fn new() -> Self {
         Self {

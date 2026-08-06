@@ -577,7 +577,7 @@ fn save_screenshot(
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
         .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
 
-    std::fs::write(&save_path, &bytes)
+    crate::artifacts::write(&save_path, &bytes)
         .map_err(|e| format!("Failed to save screenshot to {}: {}", save_path, e))?;
 
     Ok(save_path)

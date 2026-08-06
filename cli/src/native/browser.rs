@@ -302,6 +302,7 @@ pub enum WaitUntil {
 }
 
 impl WaitUntil {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
@@ -423,7 +424,7 @@ impl BrowserManager {
                 (url, BrowserProcess::Lightpanda(lp))
             }
             _ => {
-                let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
+                let chrome = crate::rt::spawn_blocking(move || launch_chrome(&options))
                     .await
                     .map_err(|e| format!("Chrome launch task failed: {}", e))??;
                 let url = chrome.ws_url.clone();
@@ -526,6 +527,17 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Self::from_client(client, ws_url, direct_page).await
+    }
+
+    /// Build a manager around an already-connected CDP client, e.g. one
+    /// created via [`CdpClient::from_transport`] on hosts that supply their
+    /// own WebSocket. `ws_url` is informational (reported by `cdp_url`).
+    pub async fn from_client(
+        client: Arc<CdpClient>,
+        ws_url: String,
+        direct_page: bool,
+    ) -> Result<Self, String> {
         let mut manager = Self {
             client,
             browser_process: None,
@@ -747,7 +759,7 @@ impl BrowserManager {
     /// `timeout_ms`. A discarded tab keeps its CDP session but has no
     /// renderer to reply (#1528). A CDP error still counts as responding.
     async fn renderer_responds(&self, session_id: &str, timeout_ms: u64) -> bool {
-        tokio::time::timeout(
+        crate::rt::timeout(
             Duration::from_millis(timeout_ms),
             self.client.send_command(
                 "Runtime.evaluate",
@@ -782,7 +794,7 @@ impl BrowserManager {
         if dialog_session == Some(session_id) {
             return Ok(RendererState::DialogBlocked);
         }
-        match tokio::time::timeout(
+        match crate::rt::timeout(
             Duration::from_millis(REVIVED_RENDERER_TIMEOUT_MS),
             self.client.send_command(
                 "Target.activateTarget",
@@ -944,9 +956,9 @@ impl BrowserManager {
             WaitUntil::None => return Ok(()),
         };
 
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+        let timeout = crate::rt::Duration::from_millis(self.default_timeout_ms);
 
-        tokio::time::timeout(timeout, async {
+        crate::rt::timeout(timeout, async {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -971,7 +983,7 @@ impl BrowserManager {
         session_id: &str,
         rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+        let timeout = crate::rt::Duration::from_millis(self.default_timeout_ms);
         poll_network_idle(session_id, rx, timeout).await
     }
 
@@ -1085,7 +1097,7 @@ impl BrowserManager {
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
-            let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::rt::spawn_blocking(move || {
                 process.wait_or_kill(timeout);
             })
             .await;
@@ -1105,8 +1117,8 @@ impl BrowserManager {
     /// Checks if the CDP connection is alive by sending a simple command.
     /// Returns false if the command times out or fails.
     pub async fn is_connection_alive(&self) -> bool {
-        let timeout = tokio::time::Duration::from_secs(3);
-        let result = tokio::time::timeout(
+        let timeout = crate::rt::Duration::from_secs(3);
+        let result = crate::rt::timeout(
             timeout,
             self.client
                 .send_command_no_params("Browser.getVersion", None),
@@ -1839,16 +1851,16 @@ impl BrowserManager {
 async fn poll_network_idle(
     session_id: &str,
     rx: &mut broadcast::Receiver<CdpEvent>,
-    overall_timeout: tokio::time::Duration,
+    overall_timeout: crate::rt::Duration,
 ) -> Result<(), String> {
     let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
 
-    tokio::time::timeout(overall_timeout, async {
-        let mut idle_start: Option<tokio::time::Instant> = None;
+    crate::rt::timeout(overall_timeout, async {
+        let mut idle_start: Option<crate::rt::Instant> = None;
 
         loop {
             let recv_result =
-                tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
+                crate::rt::timeout(crate::rt::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
                 Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
@@ -1866,12 +1878,12 @@ async fn poll_network_idle(
                             {
                                 p.remove(id);
                                 if p.is_empty() {
-                                    idle_start = Some(tokio::time::Instant::now());
+                                    idle_start = Some(crate::rt::Instant::now());
                                 }
                             }
                         }
                         "Page.loadEventFired" if p.is_empty() => {
-                            idle_start = Some(tokio::time::Instant::now());
+                            idle_start = Some(crate::rt::Instant::now());
                         }
                         _ => {}
                     }
@@ -1887,13 +1899,13 @@ async fn poll_network_idle(
                     // has already loaded (e.g. cached pages).
                     let p = pending.lock().await;
                     if p.is_empty() && idle_start.is_none() {
-                        idle_start = Some(tokio::time::Instant::now());
+                        idle_start = Some(crate::rt::Instant::now());
                     }
                 }
             }
 
             if let Some(start) = idle_start {
-                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                if start.elapsed() >= crate::rt::Duration::from_millis(500) {
                     return Ok(());
                 }
             }
@@ -1922,7 +1934,7 @@ async fn connect_cdp_with_retry(
             }
         }
 
-        tokio::time::sleep(poll_interval).await;
+        crate::rt::sleep(poll_interval).await;
     }
 }
 
@@ -1946,7 +1958,7 @@ async fn initialize_lightpanda_manager(
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
                 }
-                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                crate::rt::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
                 continue;
             }
         };
@@ -1975,7 +1987,7 @@ async fn initialize_lightpanda_manager(
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
                 }
-                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                crate::rt::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
             }
         }
     }
@@ -2008,7 +2020,7 @@ where
     let remaining = remaining_until(deadline)
         .ok_or_else(|| lightpanda_target_init_timeout(Some("deadline expired before retry")))?;
 
-    match tokio::time::timeout(remaining, operation).await {
+    match crate::rt::timeout(remaining, operation).await {
         Ok(result) => result,
         Err(_) => Err(lightpanda_target_init_timeout(Some(timeout_context))),
     }

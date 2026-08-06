@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 pub struct WebDriverClient {
@@ -236,6 +237,12 @@ fn element_id_from_value(
         .ok_or("No element ID in response".to_string())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn http_request(_method: &str, _url: &str, _body: Option<&Value>) -> Result<Value, String> {
+    Err("WebDriver HTTP transport is not supported on this platform".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn http_request(method: &str, url: &str, body: Option<&Value>) -> Result<Value, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().unwrap_or("127.0.0.1");

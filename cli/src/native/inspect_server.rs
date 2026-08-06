@@ -1,16 +1,25 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicI64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::InspectProxyHandle;
 
 /// Counter for unique attach IDs so concurrent connections don't collide.
+#[cfg(not(target_arch = "wasm32"))]
 static ATTACH_ID: AtomicI64 = AtomicI64::new(-1000);
 
 /// Lightweight HTTP + WebSocket server for `agent-browser inspect`.
@@ -22,9 +31,29 @@ static ATTACH_ID: AtomicI64 = AtomicI64::new(-1000);
 ///   `sessionId` so the DevTools frontend sees a page-level view
 pub struct InspectServer {
     port: u16,
-    _handle: tokio::task::JoinHandle<()>,
+    _handle: crate::rt::JoinHandle<()>,
 }
 
+#[cfg(target_arch = "wasm32")]
+impl InspectServer {
+    pub async fn start(
+        _proxy_handle: InspectProxyHandle,
+        _target_id: String,
+        _chrome_host_port: String,
+    ) -> Result<Self, String> {
+        Err("inspect server is not supported on this platform".to_string())
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn shutdown(self) {
+        self._handle.abort();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl InspectServer {
     /// Start the inspect proxy server.
     ///
@@ -69,6 +98,7 @@ impl InspectServer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn accept_loop(
     listener: TcpListener,
     proxy: Arc<InspectProxyHandle>,
@@ -94,6 +124,7 @@ async fn accept_loop(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     proxy: Arc<InspectProxyHandle>,
@@ -132,8 +163,10 @@ async fn handle_connection(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_HEADER_BYTES: usize = 8192;
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn handle_http_redirect(
     buf_reader: BufReader<tokio::net::TcpStream>,
     chrome_host_port: String,
@@ -172,6 +205,7 @@ async fn handle_http_redirect(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn handle_ws_proxy(
     stream: tokio::net::TcpStream,
     proxy: Arc<InspectProxyHandle>,
@@ -295,6 +329,7 @@ async fn handle_ws_proxy(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn inject_session_id(json: &str, session_id: &str) -> String {
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json) {
         if let Some(obj) = val.as_object_mut() {
@@ -309,6 +344,7 @@ fn inject_session_id(json: &str, session_id: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn strip_session_id(json: &str) -> String {
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json) {
         if let Some(obj) = val.as_object_mut() {

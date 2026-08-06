@@ -1,7 +1,73 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::color;
 use crate::connection::Response;
+
+/// Buffered stdout/stderr text collected while a capture is active. Library
+/// hosts without a usable process stdout (e.g. wasm) wrap command dispatch in
+/// [`begin_capture`]/[`end_capture`] to receive the exact text the CLI would
+/// have printed.
+#[derive(Debug, Default, Clone)]
+pub struct CapturedOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+static OUTPUT_CAPTURE: Mutex<Option<CapturedOutput>> = Mutex::new(None);
+
+/// Start buffering this module's output instead of writing it to the process
+/// streams. Captures are process-global; nested captures are not supported.
+pub fn begin_capture() {
+    *OUTPUT_CAPTURE.lock().unwrap() = Some(CapturedOutput::default());
+}
+
+/// Stop capturing and return everything buffered since [`begin_capture`].
+/// Returns an empty capture if no capture was active.
+pub fn end_capture() -> CapturedOutput {
+    OUTPUT_CAPTURE.lock().unwrap().take().unwrap_or_default()
+}
+
+#[doc(hidden)]
+pub fn emit_stdout(text: std::fmt::Arguments<'_>, newline: bool) {
+    let mut guard = OUTPUT_CAPTURE.lock().unwrap();
+    if let Some(capture) = guard.as_mut() {
+        capture.stdout.push_str(&text.to_string());
+        if newline {
+            capture.stdout.push('\n');
+        }
+    } else if newline {
+        println!("{}", text);
+    } else {
+        print!("{}", text);
+    }
+}
+
+#[doc(hidden)]
+pub fn emit_stderr(text: std::fmt::Arguments<'_>) {
+    let mut guard = OUTPUT_CAPTURE.lock().unwrap();
+    if let Some(capture) = guard.as_mut() {
+        capture.stderr.push_str(&text.to_string());
+        capture.stderr.push('\n');
+    } else {
+        eprintln!("{}", text);
+    }
+}
+
+/// Like `println!` but respects an active output capture.
+macro_rules! outln {
+    () => { $crate::output::emit_stdout(format_args!(""), true) };
+    ($($arg:tt)*) => { $crate::output::emit_stdout(format_args!($($arg)*), true) };
+}
+
+/// Like `print!` but respects an active output capture.
+macro_rules! out {
+    ($($arg:tt)*) => { $crate::output::emit_stdout(format_args!($($arg)*), false) };
+}
+
+/// Like `eprintln!` but respects an active output capture.
+macro_rules! errln {
+    ($($arg:tt)*) => { $crate::output::emit_stderr(format_args!($($arg)*)) };
+}
 
 static BOUNDARY_NONCE: OnceLock<String> = OnceLock::new();
 
@@ -77,9 +143,9 @@ fn format_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOpti
 
 fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
     let content = format_with_boundaries(content, origin, opts);
-    print!("{}", content);
+    out!("{}", content);
     if !content.ends_with('\n') {
-        println!();
+        outln!();
     }
 }
 
@@ -176,14 +242,14 @@ fn print_confirmation_required(data: &serde_json::Value) {
         .filter(|s| !s.is_empty())
         .unwrap_or(action);
 
-    println!("Confirmation required:");
+    outln!("Confirmation required:");
     if category.is_empty() {
-        println!("  {}", description);
+        outln!("  {}", description);
     } else {
-        println!("  {}: {}", category, description);
+        outln!("  {}: {}", category, description);
     }
-    println!("  Run: agent-browser confirm {}", cid);
-    println!("  Or:  agent-browser deny {}", cid);
+    outln!("  Run: agent-browser confirm {}", cid);
+    outln!("  Or:  agent-browser deny {}", cid);
 }
 
 fn format_metric_ms(value: Option<f64>) -> String {
@@ -402,16 +468,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     }),
                 );
             }
-            println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
+            outln!("{}", serde_json::to_string(&json_val).unwrap_or_default());
         } else {
-            println!("{}", serde_json::to_string(resp).unwrap_or_default());
+            outln!("{}", serde_json::to_string(resp).unwrap_or_default());
         }
         // JSON mode includes the warning field in the JSON payload already
         return;
     }
 
     if !resp.success {
-        eprintln!(
+        errln!(
             "{} {}",
             color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
@@ -419,7 +485,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Still print dialog warning after errors, since a pending dialog
         // is the most common cause of commands timing out
         if let Some(ref warning) = resp.warning {
-            eprintln!("{} {}", color::warning_indicator(), warning);
+            errln!("{} {}", color::warning_indicator(), warning);
         }
         return;
     }
@@ -436,7 +502,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    println!(
+                    outln!(
                         "{} JavaScript {} dialog is open: \"{}\"",
                         color::warning_indicator(),
                         dtype,
@@ -444,31 +510,31 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     );
                     if let Some(default_prompt) = data.get("defaultPrompt").and_then(|v| v.as_str())
                     {
-                        println!("  Default prompt text: \"{}\"", default_prompt);
+                        outln!("  Default prompt text: \"{}\"", default_prompt);
                     }
-                    println!("  Use `dialog accept [text]` or `dialog dismiss` to resolve it");
+                    outln!("  Use `dialog accept [text]` or `dialog dismiss` to resolve it");
                 } else {
-                    println!("{} No dialog is currently open", color::success_indicator());
+                    outln!("{} No dialog is currently open", color::success_indicator());
                 }
                 print_warning(resp);
                 return;
             }
         }
         if let Some(output) = format_stream_status_text(action, data) {
-            println!("{}", output);
+            outln!("{}", output);
             return;
         }
         if action == Some("vitals") {
-            println!("{}", format_vitals_text(data));
+            outln!("{}", format_vitals_text(data));
             return;
         }
         if action == Some("a11y") {
-            println!("{}", format_a11y_text(data));
+            outln!("{}", format_a11y_text(data));
             return;
         }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
-                println!("{}", output);
+                outln!("{}", output);
                 return;
             }
         }
@@ -480,12 +546,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .unwrap_or(false);
             if opened {
                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                    println!("{} Opened DevTools: {}", color::success_indicator(), url);
+                    outln!("{} Opened DevTools: {}", color::success_indicator(), url);
                 } else {
-                    println!("{} Opened DevTools", color::success_indicator());
+                    outln!("{} Opened DevTools", color::success_indicator());
                 }
             } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
-                eprintln!("Could not open DevTools: {}", err);
+                errln!("Could not open DevTools: {}", err);
             }
             return;
         }
@@ -502,20 +568,20 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-                println!("{} {}", color::success_indicator(), color::bold(title));
-                println!("  {}", color::dim(url));
+                outln!("{} {}", color::success_indicator(), color::bold(title));
+                outln!("  {}", color::dim(url));
                 return;
             }
-            println!("{}", url);
+            outln!("{}", url);
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
-            println!("{}", cdp_url);
+            outln!("{}", cdp_url);
             return;
         }
         // Rich command reports (React renders/suspense and older daemon responses)
         if let Some(report) = data.get("report").and_then(|v| v.as_str()) {
-            println!("{}", report);
+            outln!("{}", report);
             return;
         }
         // Diff responses -- route by action to avoid fragile shape probing
@@ -531,11 +597,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 }
                 Some("diff_url") => {
                     if let Some(snap_data) = obj.get("snapshot").and_then(|v| v.as_object()) {
-                        println!("{}", color::bold("Snapshot diff:"));
+                        outln!("{}", color::bold("Snapshot diff:"));
                         print_snapshot_diff(snap_data);
                     }
                     if let Some(ss_data) = obj.get("screenshot").and_then(|v| v.as_object()) {
-                        println!("\n{}", color::bold("Screenshot diff:"));
+                        outln!("\n{}", color::bold("Screenshot diff:"));
                         print_screenshot_diff(ss_data);
                     }
                     return;
@@ -551,7 +617,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Title
         if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-            println!("{}", title);
+            outln!("{}", title);
             return;
         }
         // Text
@@ -566,12 +632,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Value
         if let Some(value) = data.get("value").and_then(|v| v.as_str()) {
-            println!("{}", value);
+            outln!("{}", value);
             return;
         }
         // Count
         if let Some(count) = data.get("count").and_then(|v| v.as_i64()) {
-            println!("{}", count);
+            outln!("{}", count);
             return;
         }
         // Bounding box (get box)
@@ -581,10 +647,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 let y = obj.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let w = obj.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let h = obj.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                println!("x:      {}", x);
-                println!("y:      {}", y);
-                println!("width:  {}", w);
-                println!("height: {}", h);
+                outln!("x:      {}", x);
+                outln!("y:      {}", y);
+                outln!("width:  {}", w);
+                outln!("height: {}", h);
             }
             return;
         }
@@ -595,21 +661,21 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     Some(s) => s.to_string(),
                     None => val.to_string(),
                 };
-                println!("{}: {}", key, display);
+                outln!("{}: {}", key, display);
             }
             return;
         }
         // Boolean results
         if let Some(visible) = data.get("visible").and_then(|v| v.as_bool()) {
-            println!("{}", visible);
+            outln!("{}", visible);
             return;
         }
         if let Some(enabled) = data.get("enabled").and_then(|v| v.as_bool()) {
-            println!("{}", enabled);
+            outln!("{}", enabled);
             return;
         }
         if let Some(checked) = data.get("checked").and_then(|v| v.as_bool()) {
-            println!("{}", checked);
+            outln!("{}", checked);
             return;
         }
         // Eval result
@@ -621,7 +687,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // iOS Devices
         if let Some(devices) = data.get("devices").and_then(|v| v.as_array()) {
             if devices.is_empty() {
-                println!("No iOS devices available. Open Xcode to download simulator runtimes.");
+                outln!("No iOS devices available. Open Xcode to download simulator runtimes.");
                 return;
             }
 
@@ -644,7 +710,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .collect();
 
             if !real_devices.is_empty() {
-                println!("Connected Devices:\n");
+                outln!("Connected Devices:\n");
                 for device in real_devices.iter() {
                     let name = device
                         .get("name")
@@ -652,14 +718,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .unwrap_or("Unknown");
                     let runtime = device.get("runtime").and_then(|v| v.as_str()).unwrap_or("");
                     let udid = device.get("udid").and_then(|v| v.as_str()).unwrap_or("");
-                    println!("  {} {} ({})", color::green("●"), name, runtime);
-                    println!("    {}", color::dim(udid));
+                    outln!("  {} {} ({})", color::green("●"), name, runtime);
+                    outln!("    {}", color::dim(udid));
                 }
-                println!();
+                outln!();
             }
 
             if !simulators.is_empty() {
-                println!("Simulators:\n");
+                outln!("Simulators:\n");
                 for device in simulators.iter() {
                     let name = device
                         .get("name")
@@ -676,8 +742,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     } else {
                         color::dim("○")
                     };
-                    println!("  {} {} ({})", state_indicator, name, runtime);
-                    println!("    {}", color::dim(udid));
+                    outln!("  {} {} ({})", state_indicator, name, runtime);
+                    outln!("    {}", color::dim(udid));
                 }
             }
             return;
@@ -699,9 +765,9 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     " ".to_string()
                 };
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    outln!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    outln!("{} [{}] {} - {}", marker, tab_id, title, url);
                 }
             }
             return;
@@ -717,7 +783,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     ""
                 };
                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                    println!(
+                    outln!(
                         "{} Switched to tab [{}] ({}){}",
                         color::success_indicator(),
                         tab_id,
@@ -725,7 +791,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         note
                     );
                 } else {
-                    println!(
+                    outln!(
                         "{} Switched to tab [{}]{}",
                         color::success_indicator(),
                         tab_id,
@@ -744,7 +810,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 };
                 let tab_label = data.get("label").and_then(|v| v.as_str());
                 if let Some(lbl) = tab_label {
-                    println!(
+                    outln!(
                         "{} {} [{}] {} ({} total)",
                         color::success_indicator(),
                         label_noun,
@@ -753,7 +819,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         total
                     );
                 } else {
-                    println!(
+                    outln!(
                         "{} {} [{}] ({} total)",
                         color::success_indicator(),
                         label_noun,
@@ -785,7 +851,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 for log in logs {
                     let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                     let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    println!("{} {}", color::console_level_prefix(level), text);
+                    outln!("{} {}", color::console_level_prefix(level), text);
                 }
             }
             return;
@@ -794,7 +860,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
                 let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+                outln!("{} {}", color::error_indicator(), msg);
             }
             return;
         }
@@ -803,14 +869,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             for cookie in cookies {
                 let name = cookie.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let value = cookie.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{}={}", name, value);
+                outln!("{}={}", name, value);
             }
             return;
         }
         // Network requests
         if let Some(requests) = data.get("requests").and_then(|v| v.as_array()) {
             if requests.is_empty() {
-                println!("No requests captured");
+                outln!("No requests captured");
             } else {
                 for req in requests {
                     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
@@ -822,11 +888,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     let request_id = req.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
                     let status = req.get("status").and_then(|v| v.as_i64());
                     match status {
-                        Some(s) => println!(
+                        Some(s) => outln!(
                             "[{}] {} {} ({}) {}",
-                            request_id, method, url, resource_type, s
+                            request_id,
+                            method,
+                            url,
+                            resource_type,
+                            s
                         ),
-                        None => println!("[{}] {} {} ({})", request_id, method, url, resource_type),
+                        None => outln!("[{}] {} {} ({})", request_id, method, url, resource_type),
                     }
                 }
             }
@@ -840,13 +910,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     Some("console") => "Console log cleared",
                     _ => "Request log cleared",
                 };
-                println!("{} {}", color::success_indicator(), label);
+                outln!("{} {}", color::success_indicator(), label);
                 return;
             }
         }
         // Bounding box
         if let Some(box_data) = data.get("box") {
-            println!(
+            outln!(
                 "{}",
                 serde_json::to_string_pretty(box_data).unwrap_or_default()
             );
@@ -857,14 +927,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             for (i, el) in elements.iter().enumerate() {
                 let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
                 let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                println!("[{}] {} \"{}\"", i, tag, text);
+                outln!("[{}] {} \"{}\"", i, tag, text);
 
                 if let Some(box_data) = el.get("box") {
                     let w = box_data.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
                     let h = box_data.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
                     let x = box_data.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
                     let y = box_data.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-                    println!("    box: {}x{} at ({}, {})", w, h, x, y);
+                    outln!("    box: {}x{} at ({}, {})", w, h, x, y);
                 }
 
                 if let Some(styles) = el.get("styles") {
@@ -890,14 +960,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    println!("    font: {} {} {}", font_size, font_weight, font_family);
-                    println!("    color: {}", color);
-                    println!("    background: {}", bg);
+                    outln!("    font: {} {} {}", font_size, font_weight, font_family);
+                    outln!("    color: {}", color);
+                    outln!("    background: {}", bg);
                     if radius != "0px" {
-                        println!("    border-radius: {}", radius);
+                        outln!("    border-radius: {}", radius);
                     }
                 }
-                println!();
+                outln!();
             }
             return;
         }
@@ -913,7 +983,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         } else {
                             ""
                         };
-                        println!(
+                        outln!(
                             "{} Tab [{}] closed{}",
                             color::success_indicator(),
                             closed_id,
@@ -925,7 +995,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 }
                 _ => "Browser closed",
             };
-            println!("{} {}", color::success_indicator(), label);
+            outln!("{} {}", color::success_indicator(), label);
             return;
         }
         // Started actions (profiling, HAR, recording)
@@ -933,16 +1003,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if started {
                 match action {
                     Some("profiler_start") => {
-                        println!("{} Profiling started", color::success_indicator());
+                        outln!("{} Profiling started", color::success_indicator());
                     }
                     Some("har_start") => {
-                        println!("{} HAR recording started", color::success_indicator());
+                        outln!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!("{} Recording started: {}", color::success_indicator(), path);
+                            outln!("{} Recording started: {}", color::success_indicator(), path);
                         } else {
-                            println!("{} Recording started", color::success_indicator());
+                            outln!("{} Recording started", color::success_indicator());
                         }
                     }
                 }
@@ -956,14 +1026,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
-                println!(
+                outln!(
                     "{} Recording restarted: {} (previous saved to {})",
                     color::success_indicator(),
                     path,
                     prev_path
                 );
             } else {
-                println!("{} Recording started: {}", color::success_indicator(), path);
+                outln!("{} Recording started: {}", color::success_indicator(), path);
             }
             return;
         }
@@ -971,17 +1041,17 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if data.get("frames").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
                 if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                    println!(
+                    outln!(
                         "{} Recording saved to {} - {}",
                         color::warning_indicator(),
                         path,
                         error
                     );
                 } else {
-                    println!("{} Recording saved to {}", color::success_indicator(), path);
+                    outln!("{} Recording saved to {}", color::success_indicator(), path);
                 }
             } else {
-                println!("{} Recording stopped", color::success_indicator());
+                outln!("{} Recording stopped", color::success_indicator());
             }
             return;
         }
@@ -994,13 +1064,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if filename.is_empty() {
-                    println!(
+                    outln!(
                         "{} Downloaded to {}",
                         color::success_indicator(),
                         color::green(path)
                     );
                 } else {
-                    println!(
+                    outln!(
                         "{} Downloaded to {} ({})",
                         color::success_indicator(),
                         color::green(path),
@@ -1012,14 +1082,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Trace stop without path
         if data.get("traceStopped").is_some() {
-            println!("{} Trace stopped", color::success_indicator());
+            outln!("{} Trace stopped", color::success_indicator());
             return;
         }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
                 "screenshot" => {
-                    println!(
+                    outln!(
                         "{} Screenshot saved to {}",
                         color::success_indicator(),
                         color::green(path)
@@ -1031,14 +1101,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                             let role = ann.get("role").and_then(|r| r.as_str()).unwrap_or("");
                             let name = ann.get("name").and_then(|n| n.as_str()).unwrap_or("");
                             if name.is_empty() {
-                                println!(
+                                outln!(
                                     "   {} @{} {}",
                                     color::dim(&format!("[{}]", num)),
                                     ref_id,
                                     role,
                                 );
                             } else {
-                                println!(
+                                outln!(
                                     "   {} @{} {} {:?}",
                                     color::dim(&format!("[{}]", num)),
                                     ref_id,
@@ -1049,23 +1119,23 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         }
                     }
                 }
-                "pdf" => println!(
+                "pdf" => outln!(
                     "{} PDF saved to {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "trace_stop" => println!(
+                "trace_stop" => outln!(
                     "{} Trace saved to {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "profiler_stop" => println!(
+                "profiler_stop" => outln!(
                     "{} Profile saved to {} ({} events)",
                     color::success_indicator(),
                     color::green(path),
                     data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
-                "har_stop" => println!(
+                "har_stop" => outln!(
                     "{} HAR saved to {} ({} requests)",
                     color::success_indicator(),
                     color::green(path),
@@ -1073,26 +1143,26 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .and_then(|c| c.as_u64())
                         .unwrap_or(0)
                 ),
-                "download" | "waitfordownload" => println!(
+                "download" | "waitfordownload" => outln!(
                     "{} Download saved to {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "video_stop" => println!(
+                "video_stop" => outln!(
                     "{} Video saved to {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "state_save" => println!(
+                "state_save" => outln!(
                     "{} State saved to {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
                 "state_load" => {
                     if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
-                        println!("{}", note);
+                        outln!("{}", note);
                     }
-                    println!(
+                    outln!(
                         "{} State path set to {}",
                         color::success_indicator(),
                         color::green(path)
@@ -1101,11 +1171,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
                     if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
-                        println!("{}", note);
+                        outln!("{}", note);
                     }
-                    println!("Path: {}", path);
+                    outln!("Path: {}", path);
                 }
-                _ => println!(
+                _ => outln!(
                     "{} Saved to {}",
                     color::success_indicator(),
                     color::green(path)
@@ -1117,10 +1187,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // State list
         if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
             if let Some(dir) = data.get("directory").and_then(|v| v.as_str()) {
-                println!("{}", color::bold(&format!("Saved states in {}", dir)));
+                outln!("{}", color::bold(&format!("Saved states in {}", dir)));
             }
             if files.is_empty() {
-                println!("{}", color::dim("  No state files found"));
+                outln!("{}", color::dim("  No state files found"));
             } else {
                 for file in files {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
@@ -1137,7 +1207,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     };
                     let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
-                    println!(
+                    outln!(
                         "  {} {}",
                         filename,
                         color::dim(&format!("({}, {}){}", size_str, date_str, enc_str))
@@ -1151,7 +1221,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
             let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
             let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
-            println!(
+            outln!(
                 "{} Renamed {} -> {}",
                 color::success_indicator(),
                 old_name,
@@ -1162,7 +1232,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
         // State clear
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
-            println!(
+            outln!(
                 "{} Cleared {} state file(s)",
                 color::success_indicator(),
                 cleared
@@ -1179,15 +1249,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let enc_str = if encrypted { " (encrypted)" } else { "" };
-            println!("State file summary{}:", enc_str);
-            println!("  Cookies: {}", cookies);
-            println!("  Origins with localStorage: {}", origins);
+            outln!("State file summary{}:", enc_str);
+            outln!("  Cookies: {}", cookies);
+            outln!("  Origins with localStorage: {}", origins);
             return;
         }
 
         // State clean
         if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
-            println!(
+            outln!(
                 "{} Cleaned {} old state file(s)",
                 color::success_indicator(),
                 cleaned
@@ -1197,20 +1267,20 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
         // Informational note
         if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
-            println!("{}", note);
+            outln!("{}", note);
             return;
         }
         // Auth list
         if let Some(profiles) = data.get("profiles").and_then(|v| v.as_array()) {
             if profiles.is_empty() {
-                println!("{}", color::dim("No auth profiles saved"));
+                outln!("{}", color::dim("No auth profiles saved"));
             } else {
-                println!("{}", color::bold("Auth profiles:"));
+                outln!("{}", color::bold("Auth profiles:"));
                 for p in profiles {
                     let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("");
                     let user = p.get("username").and_then(|v| v.as_str()).unwrap_or("");
-                    println!(
+                    outln!(
                         "  {} {} {}",
                         color::green(name),
                         color::dim(user),
@@ -1234,12 +1304,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let last_login = profile.get("lastLoginAt").and_then(|v| v.as_str());
-            println!("Name: {}", name);
-            println!("URL: {}", url);
-            println!("Username: {}", user);
-            println!("Created: {}", created);
+            outln!("Name: {}", name);
+            outln!("URL: {}", url);
+            outln!("Username: {}", user);
+            outln!("Created: {}", created);
             if let Some(ll) = last_login {
-                println!("Last login: {}", ll);
+                outln!("Last login: {}", ll);
             }
             return;
         }
@@ -1247,7 +1317,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Auth save/update/login/delete
         if data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            println!(
+            outln!(
                 "{} Auth profile '{}' saved",
                 color::success_indicator(),
                 name
@@ -1261,7 +1331,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             && !data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false)
         {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            println!(
+            outln!(
                 "{} Auth profile '{}' updated",
                 color::success_indicator(),
                 name
@@ -1275,14 +1345,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-                println!(
+                outln!(
                     "{} Logged in as '{}' - {}",
                     color::success_indicator(),
                     name,
                     title
                 );
             } else {
-                println!("{} Logged in as '{}'", color::success_indicator(), name);
+                outln!("{} Logged in as '{}'", color::success_indicator(), name);
             }
             return;
         }
@@ -1292,7 +1362,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .unwrap_or(false)
         {
             if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
-                println!(
+                outln!(
                     "{} Auth profile '{}' deleted",
                     color::success_indicator(),
                     name
@@ -1311,7 +1381,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            println!("{} Action confirmed", color::success_indicator());
+            outln!("{} Action confirmed", color::success_indicator());
             return;
         }
         if data
@@ -1319,12 +1389,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            println!("{} Action denied", color::success_indicator());
+            outln!("{} Action denied", color::success_indicator());
             return;
         }
 
         // Default success
-        println!("{} Done", color::success_indicator());
+        outln!("{} Done", color::success_indicator());
     }
 
     print_warning(resp);
@@ -1368,13 +1438,13 @@ fn print_lifecycle_note(data: &serde_json::Value) {
     }
 
     if !parts.is_empty() {
-        eprintln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
+        errln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
     }
 }
 
 fn print_warning(resp: &Response) {
     if let Some(ref warning) = resp.warning {
-        eprintln!("{} {}", color::warning_indicator(), warning);
+        errln!("{} {}", color::warning_indicator(), warning);
     }
 }
 
@@ -3475,12 +3545,12 @@ Examples:
 
         _ => return false,
     };
-    println!("{}", help.trim());
+    outln!("{}", help.trim());
     true
 }
 
 pub fn print_help() {
-    println!(
+    outln!(
         r#"
 agent-browser - fast browser automation CLI for AI agents
 
@@ -3877,23 +3947,23 @@ fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !changed {
-        println!("{} No changes detected", color::success_indicator());
+        outln!("{} No changes detected", color::success_indicator());
         return;
     }
     if let Some(diff) = data.get("diff").and_then(|v| v.as_str()) {
         for line in diff.lines() {
             if line.starts_with("+ ") {
-                println!("{}", color::green(line));
+                outln!("{}", color::green(line));
             } else if line.starts_with("- ") {
-                println!("{}", color::red(line));
+                outln!("{}", color::red(line));
             } else {
-                println!("{}", color::dim(line));
+                outln!("{}", color::dim(line));
             }
         }
         let additions = data.get("additions").and_then(|v| v.as_i64()).unwrap_or(0);
         let removals = data.get("removals").and_then(|v| v.as_i64()).unwrap_or(0);
         let unchanged = data.get("unchanged").and_then(|v| v.as_i64()).unwrap_or(0);
-        println!(
+        outln!(
             "\n{} additions, {} removals, {} unchanged",
             color::green(&additions.to_string()),
             color::red(&removals.to_string()),
@@ -3913,24 +3983,24 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if dim_mismatch {
-        println!(
+        outln!(
             "{} Images have different dimensions",
             color::error_indicator()
         );
     } else if is_match {
-        println!(
+        outln!(
             "{} Images match (0% difference)",
             color::success_indicator()
         );
     } else {
-        println!(
+        outln!(
             "{} {:.2}% pixels differ",
             color::error_indicator(),
             mismatch
         );
     }
     if let Some(diff_path) = data.get("diffPath").and_then(|v| v.as_str()) {
-        println!("  Diff image: {}", color::green(diff_path));
+        outln!("  Diff image: {}", color::green(diff_path));
     }
     let total = data
         .get("totalPixels")
@@ -3940,7 +4010,7 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .get("differentPixels")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    println!(
+    outln!(
         "  {} different / {} total pixels",
         color::red(&different.to_string()),
         total
@@ -3948,7 +4018,7 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
 }
 
 pub fn print_version() {
-    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
+    outln!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(test)]

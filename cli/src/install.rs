@@ -1,9 +1,12 @@
+#[cfg(not(target_arch = "wasm32"))]
 use crate::color;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::{exit, Command, ExitStatus, Stdio};
 
+#[cfg(not(target_arch = "wasm32"))]
 const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
@@ -98,6 +101,10 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
     None
 }
 
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(unused_variables)
+)]
 fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -151,6 +158,7 @@ fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn platform_key() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -182,6 +190,7 @@ fn platform_key() -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn fetch_download_url() -> Result<(String, String), String> {
     let client = http_client()?;
     let resp = client
@@ -226,6 +235,7 @@ async fn fetch_download_url() -> Result<(String, String), String> {
     Ok((version, url))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn format_reqwest_error(e: &reqwest::Error) -> String {
     let mut msg = e.to_string();
     let mut source = std::error::Error::source(e);
@@ -236,6 +246,7 @@ fn format_reqwest_error(e: &reqwest::Error) -> String {
     msg
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
@@ -245,6 +256,7 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {}", format_reqwest_error(&e)))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     let client = http_client()?;
     let max_retries = 3;
@@ -332,6 +344,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     Err(last_err)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| format!("Failed to create directory: {}", e))?;
 
@@ -397,6 +410,7 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_install(with_deps: bool) {
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         eprintln!(
@@ -497,6 +511,7 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_status_result(status: io::Result<ExitStatus>) -> Result<(), String> {
     match status {
         Ok(s) if s.success() => Ok(()),
@@ -510,6 +525,7 @@ fn install_status_result(status: io::Result<ExitStatus>) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn report_install_status(status: io::Result<ExitStatus>) {
     match install_status_result(status) {
         Ok(()) => {
@@ -530,6 +546,7 @@ fn report_install_status(status: io::Result<ExitStatus>) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apt_dependency_specs() -> Vec<(&'static str, Option<&'static str>)> {
     vec![
         ("libxcb-shm0", None),
@@ -572,6 +589,7 @@ fn apt_dependency_specs() -> Vec<(&'static str, Option<&'static str>)> {
     ]
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_apt_deps_with<F>(mut package_exists: F) -> Vec<&'static str>
 where
     F: FnMut(&str) -> bool,
@@ -589,10 +607,12 @@ where
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_apt_deps() -> Vec<&'static str> {
     resolve_apt_deps_with(package_exists_apt)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_linux_deps() {
     println!("{}", color::cyan("Installing system dependencies..."));
 
@@ -783,6 +803,7 @@ fn install_linux_deps() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn which_exists(cmd: &str) -> bool {
     #[cfg(unix)]
     {
@@ -806,6 +827,7 @@ fn which_exists(cmd: &str) -> bool {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn package_exists_apt(pkg: &str) -> bool {
     Command::new("apt-cache")
         .arg("show")

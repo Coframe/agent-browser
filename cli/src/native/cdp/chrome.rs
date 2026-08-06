@@ -660,7 +660,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     // killpg(), preventing orphaned processes (issue #1113).
     //
     // NOTE: Do NOT use PR_SET_PDEATHSIG here. Chrome is spawned via
-    // tokio::task::spawn_blocking, and PR_SET_PDEATHSIG fires when the
+    // crate::rt::spawn_blocking, and PR_SET_PDEATHSIG fires when the
     // *thread* that forked the child exits, not the process. Tokio reaps
     // idle blocking threads after ~10s, which kills Chrome (issue #1157).
     #[cfg(unix)]
@@ -1002,6 +1002,12 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
+#[cfg(target_arch = "wasm32")]
+async fn verify_ws_endpoint(_ws_url: &str) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn verify_ws_endpoint(ws_url: &str) -> bool {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1029,6 +1035,10 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
 
 /// Returns the default Chrome user-data directory paths for the current platform.
 /// Includes Chrome, Chrome Canary, Chromium, and Brave.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(unused_mut)
+)]
 pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -1532,6 +1542,11 @@ fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
 #[cfg(target_os = "windows")]
 fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
     chromium_dir.join("chrome-win/chrome.exe")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    chromium_dir.join("chrome-linux/chrome")
 }
 
 fn expand_tilde(path: &str) -> String {

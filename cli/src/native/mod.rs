@@ -11,6 +11,7 @@ pub mod cdp;
 #[allow(dead_code)]
 pub mod cookies;
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon;
 #[allow(dead_code)]
 pub mod diff;
