@@ -1,5 +1,5 @@
 use agent_browser::{
-    chat, color, commands, connection, doctor, flags, install, mcp, native, output, plugins, read,
+    chat, color, commands, connection, doctor, flags, install, mcp, native, output, plugins,
     skills, upgrade, validation,
 };
 
