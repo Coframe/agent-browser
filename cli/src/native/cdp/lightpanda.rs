@@ -237,7 +237,7 @@ async fn wait_for_lightpanda_ready(
     logs: &LaunchLogBuffer,
     startup_timeout: Duration,
 ) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + startup_timeout;
+    let deadline = crate::rt::Instant::now() + startup_timeout;
     let mut last_probe_error = None;
 
     loop {
@@ -246,7 +246,7 @@ async fn wait_for_lightpanda_ready(
             // before we snapshot them.  This is best-effort: lines written just
             // before exit may still be missing, but the most useful output (early
             // startup errors) will already be in the buffer.
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            crate::rt::sleep(Duration::from_millis(25)).await;
             return Err(lightpanda_launch_error(
                 &format!(
                     "Lightpanda exited before CDP became ready (status: {})",
@@ -264,7 +264,7 @@ async fn wait_for_lightpanda_ready(
             Err(err) => last_probe_error = Some(err),
         }
 
-        if std::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(lightpanda_launch_error(
                 &format!(
                     "Timed out after {}ms waiting for Lightpanda CDP endpoint on port {}",
@@ -276,7 +276,7 @@ async fn wait_for_lightpanda_ready(
             ));
         }
 
-        tokio::time::sleep(LIGHTPANDA_POLL_INTERVAL).await;
+        crate::rt::sleep(LIGHTPANDA_POLL_INTERVAL).await;
     }
 }
 
@@ -331,7 +331,7 @@ mod tests {
     }
 
     async fn serve_json_version_once_after_delay(port: u16, delay_ms: u64, body: &'static str) {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        crate::rt::sleep(Duration::from_millis(delay_ms)).await;
         let listener = TokioTcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = [0u8; 1024];
@@ -348,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn waits_for_ready_without_logs() {
         let port = unused_port();
-        tokio::spawn(serve_json_version_once_after_delay(
+        crate::rt::spawn(serve_json_version_once_after_delay(
             port,
             150,
             r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/"}"#,
@@ -407,7 +407,7 @@ mod tests {
 
         let timeout = Duration::from_millis(300);
         let (logs, _drainers) = start_log_drainers(&mut child).unwrap();
-        let err = tokio::time::timeout(
+        let err = crate::rt::timeout(
             Duration::from_secs(2),
             wait_for_lightpanda_ready(&mut child, port, &logs, timeout),
         )

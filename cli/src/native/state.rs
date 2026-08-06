@@ -196,10 +196,10 @@ async fn collect_storage_in_target(
         }
 
         // Fulfill intercepted requests with blank HTML until the page loads
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_secs(5);
         let mut page_loaded = false;
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv()).await {
+        while crate::rt::Instant::now() < deadline {
+            match crate::rt::timeout(crate::rt::Duration::from_secs(2), event_rx.recv()).await {
                 Ok(Ok(evt)) if evt.session_id.as_deref() == Some(temp_session) => {
                     if evt.method == "Fetch.requestPaused" {
                         if let Some(request_id) =
@@ -493,7 +493,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .await?;
 
         // Brief wait for navigation
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(500)).await;
 
         for entry in &origin.local_storage {
             let js = format!(

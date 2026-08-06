@@ -356,10 +356,10 @@ pub struct DaemonState {
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
-    pub last_command_finished: Option<std::time::Instant>,
+    pub last_command_finished: Option<crate::rt::Instant>,
     /// When session state was last saved or a periodic autosave last failed,
     /// used to enforce the minimum interval between periodic saves.
-    pub last_autosave_attempt: Option<std::time::Instant>,
+    pub last_autosave_attempt: Option<crate::rt::Instant>,
     pub session_id: String,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
@@ -399,10 +399,10 @@ pub struct DaemonState {
     /// Background task that processes Fetch.requestPaused events in real-time,
     /// handling domain filtering, route interception, and origin-scoped headers
     /// without deadlocking navigation/evaluate.
-    fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
+    fetch_handler_task: Option<crate::rt::JoinHandle<()>>,
     /// Background task that auto-accepts `alert` and `beforeunload` dialogs
     /// so they never block the agent.
-    dialog_handler_task: Option<tokio::task::JoinHandle<()>>,
+    dialog_handler_task: Option<crate::rt::JoinHandle<()>>,
     pub mouse_state: MouseState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
@@ -449,6 +449,12 @@ fn default_idle_shutdown_is_blocked(
     browser_blocks_shutdown: bool,
 ) -> bool {
     is_webdriver || (!provider_owned && browser_blocks_shutdown)
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DaemonState {
@@ -606,7 +612,7 @@ impl DaemonState {
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
 
-        self.fetch_handler_task = Some(tokio::spawn(async move {
+        self.fetch_handler_task = Some(crate::rt::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) if event.method == "Fetch.authRequired" => {
@@ -785,7 +791,7 @@ impl DaemonState {
         let client = browser.client.clone();
         let mut rx = browser.client.subscribe();
 
-        self.dialog_handler_task = Some(tokio::spawn(async move {
+        self.dialog_handler_task = Some(crate::rt::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) if event.method == "Page.javascriptDialogOpening" => {
@@ -2127,7 +2133,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .unwrap_or("")
         .to_string();
 
-    let cmd_start = std::time::Instant::now();
+    let cmd_start = crate::rt::Instant::now();
 
     if let Err(err) = validate_restore_config_from_command(cmd) {
         return error_response(&id, &err);
@@ -2541,7 +2547,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // active command burst to settle before collecting state. Stamped even on
     // error: a failed click can still have navigated.
     if !skip_launch {
-        state.last_command_finished = Some(std::time::Instant::now());
+        state.last_command_finished = Some(crate::rt::Instant::now());
     }
 
     let mut resp = match result {
@@ -3627,7 +3633,7 @@ fn autosave_due(state: &DaemonState, interval_ms: u64) -> bool {
     if state.pending_dialog.is_some() {
         return false;
     }
-    let now = std::time::Instant::now();
+    let now = crate::rt::Instant::now();
     if let Some(t) = state.last_command_finished {
         if now.duration_since(t) < std::time::Duration::from_millis(AUTOSAVE_QUIET_PERIOD_MS) {
             return false;
@@ -3663,7 +3669,7 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
     if state.browser.is_none() {
         return;
     }
-    state.last_autosave_attempt = Some(std::time::Instant::now());
+    state.last_autosave_attempt = Some(crate::rt::Instant::now());
     let _ = auto_save_restore_state(state).await;
 }
 
@@ -3721,7 +3727,7 @@ pub(crate) async fn auto_save_restore_state(
             state.restore_saved_path = Some(path.clone());
             // Saves from any path (close, relaunch, restore-key change) reset
             // the periodic interval so the tick doesn't immediately re-save.
-            state.last_autosave_attempt = Some(std::time::Instant::now());
+            state.last_autosave_attempt = Some(crate::rt::Instant::now());
             Ok(Some(path))
         }
         Err(err) => {
@@ -4443,6 +4449,10 @@ async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
     Ok(json!({ "opened": true, "url": url }))
 }
 
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(unused_variables)
+)]
 fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(url).spawn();
@@ -5142,7 +5152,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     // Just a timeout wait
-    tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
+    crate::rt::sleep(crate::rt::Duration::from_millis(timeout_ms)).await;
     Ok(json!({ "waited": "timeout", "ms": timeout_ms }))
 }
 
@@ -5255,7 +5265,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.back().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -5263,7 +5273,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.back()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    crate::rt::sleep(crate::rt::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -5273,7 +5283,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.forward().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -5281,7 +5291,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.forward()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    crate::rt::sleep(crate::rt::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -5291,7 +5301,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.reload().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(1000)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -5305,7 +5315,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
         .await?;
 
     let mut rx = mgr.client.subscribe();
-    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+    let _ = crate::rt::timeout(crate::rt::Duration::from_secs(10), async {
         loop {
             match rx.recv().await {
                 Ok(event) => {
@@ -5372,7 +5382,7 @@ async fn wait_for_selector(
 }
 
 async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
 
     loop {
         let url = mgr.get_url().await?;
@@ -5380,11 +5390,11 @@ async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> R
             return Ok(());
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(100)).await;
     }
 }
 
@@ -5449,7 +5459,7 @@ async fn wait_for_selector_in_frame(
     let function = format!(
         "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
     );
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
     loop {
         let result = client
             .send_command(
@@ -5470,10 +5480,10 @@ async fn wait_for_selector_in_frame(
         if satisfied {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(100)).await;
     }
 }
 
@@ -5483,7 +5493,7 @@ async fn poll_until_true(
     expression: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
 
     loop {
         let result: super::cdp::types::EvaluateResult = client
@@ -5508,11 +5518,11 @@ async fn poll_until_true(
             return Ok(());
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(100)).await;
     }
 }
 
@@ -6225,17 +6235,17 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     // Wait for download to complete
-    const DOWNLOAD_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
-    let deadline = tokio::time::Instant::now() + DOWNLOAD_TIMEOUT;
+    const DOWNLOAD_TIMEOUT: crate::rt::Duration = crate::rt::Duration::from_secs(30);
+    let deadline = crate::rt::Instant::now() + DOWNLOAD_TIMEOUT;
     let mut downloaded_guid: Option<String> = None;
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::rt::Instant::now());
         if remaining.is_zero() {
             return Err("Timeout waiting for download to complete".to_string());
         }
 
-        match tokio::time::timeout(remaining, rx.recv()).await {
+        match crate::rt::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 // Browser-domain download events may arrive without a sessionId
                 // or with a different sessionId than the page session, so we
@@ -6287,7 +6297,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             if guid_path.exists() {
                 break;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(100)).await;
         }
         if guid_path.exists() {
             std::fs::rename(&guid_path, &dest)
@@ -7267,7 +7277,7 @@ async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     // Give layout shifts and React effects a chance to settle.
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    crate::rt::sleep(std::time::Duration::from_millis(3000)).await;
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url = mgr.get_url().await.unwrap_or_default();
@@ -7860,8 +7870,8 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     let timeout_ms = state.timeout_ms(cmd);
 
     let wait_until = WaitUntil::from_str(load_state);
-    let _ = tokio::time::timeout(
-        tokio::time::Duration::from_millis(timeout_ms),
+    let _ = crate::rt::timeout(
+        crate::rt::Duration::from_millis(timeout_ms),
         mgr.wait_for_lifecycle_external(wait_until, &session_id),
     )
     .await
@@ -8915,7 +8925,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                 Some(&target_session_id),
             )
             .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(10)).await;
     }
 
     // Mouse up at target
@@ -9011,10 +9021,10 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
     let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::rt::Instant::now());
         if remaining.is_zero() {
             return Err(format!(
                 "Timeout waiting for response matching '{}'",
@@ -9022,7 +9032,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
             ));
         }
 
-        match tokio::time::timeout(remaining, rx.recv()).await {
+        match crate::rt::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 if event.method == "Network.responseReceived"
                     && event.session_id.as_deref() == Some(&session_id)
@@ -9090,15 +9100,15 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
     let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::rt::Instant::now());
         if remaining.is_zero() {
             return Err("Timeout waiting for download".to_string());
         }
 
-        match tokio::time::timeout(remaining, rx.recv()).await {
+        match crate::rt::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
                 // Browser-domain events may arrive without a sessionId;
                 // Page-domain events are matched by session.
@@ -10296,7 +10306,7 @@ async fn wait_for_any_selector(
     selectors: &[&str],
     timeout_ms: u64,
 ) -> Result<String, String> {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::rt::Instant::now() + crate::rt::Duration::from_millis(timeout_ms);
 
     loop {
         for selector in selectors {
@@ -10349,11 +10359,11 @@ async fn wait_for_any_selector(
             }
         }
 
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::Instant::now() >= deadline {
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(
+        crate::rt::sleep(crate::rt::Duration::from_millis(
             AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS,
         ))
         .await;
@@ -10612,11 +10622,11 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let mut rx = mgr.client.subscribe();
     let post_submit_timeout_ms = auth_timeout_ms.min(10_000);
     let deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_millis(post_submit_timeout_ms);
+        crate::rt::Instant::now() + crate::rt::Duration::from_millis(post_submit_timeout_ms);
     let mut navigated = false;
 
     loop {
-        let result = tokio::time::timeout_at(deadline, rx.recv()).await;
+        let result = crate::rt::timeout_at(deadline, rx.recv()).await;
         match result {
             Ok(Ok(event)) => {
                 if event.session_id.as_deref() == Some(&session_id) {
@@ -10637,7 +10647,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if !navigated {
         let fallback_sleep_ms = auth_timeout_ms.min(2_000);
         if fallback_sleep_ms > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(fallback_sleep_ms)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(fallback_sleep_ms)).await;
         }
     }
 
@@ -10761,7 +10771,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                     Some(&session_id),
                 )
                 .await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
+            crate::rt::sleep(crate::rt::Duration::from_millis(16)).await;
         }
 
         mgr.client
@@ -10795,7 +10805,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 Some(&session_id),
             )
             .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
+        crate::rt::sleep(crate::rt::Duration::from_millis(16)).await;
     }
 
     mgr.client
@@ -11577,10 +11587,10 @@ mod tests {
 
     async fn start_webdriver_response_server(
         responses: Vec<(&'static str, Value)>,
-    ) -> (u16, tokio::task::JoinHandle<usize>) {
+    ) -> (u16, crate::rt::JoinHandle<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
+        let handle = crate::rt::spawn(async move {
             let mut handled = 0;
             for (expected_path, body) in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -11687,10 +11697,10 @@ mod tests {
     fn test_autosave_waits_for_quiet_period_after_command() {
         let mut state = DaemonState::new();
 
-        state.last_command_finished = Some(std::time::Instant::now());
+        state.last_command_finished = Some(crate::rt::Instant::now());
         assert!(!autosave_due(&state, 30_000));
 
-        state.last_command_finished = std::time::Instant::now().checked_sub(
+        state.last_command_finished = crate::rt::Instant::now().checked_sub(
             std::time::Duration::from_millis(AUTOSAVE_QUIET_PERIOD_MS + 1_000),
         );
         assert!(state.last_command_finished.is_some());
@@ -11701,11 +11711,11 @@ mod tests {
     fn test_autosave_enforces_min_interval_between_attempts() {
         let mut state = DaemonState::new();
 
-        state.last_autosave_attempt = Some(std::time::Instant::now());
+        state.last_autosave_attempt = Some(crate::rt::Instant::now());
         assert!(!autosave_due(&state, 30_000));
 
         state.last_autosave_attempt =
-            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(31));
+            crate::rt::Instant::now().checked_sub(std::time::Duration::from_secs(31));
         assert!(state.last_autosave_attempt.is_some());
         assert!(autosave_due(&state, 30_000));
     }

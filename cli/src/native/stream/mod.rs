@@ -1,17 +1,25 @@
 mod cdp_loop;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod chat;
+#[cfg(not(target_arch = "wasm32"))]
 mod dashboard;
+#[cfg(not(target_arch = "wasm32"))]
 mod discovery;
+#[cfg(not(target_arch = "wasm32"))]
 mod http;
+#[cfg(not(target_arch = "wasm32"))]
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
+#[cfg(not(target_arch = "wasm32"))]
 pub use dashboard::run_dashboard_server;
 
+use crate::rt::Instant;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
@@ -121,7 +129,7 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 /// The timestamp lets the idle-shutdown path re-check activity after waiting
 /// for a command to release the daemon state lock. The notification wakes the
 /// timer promptly for ordinary command and dashboard activity.
-pub(crate) struct IdleActivity {
+pub struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
 }
@@ -199,8 +207,8 @@ pub struct StreamServer {
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
     shutdown_tx: watch::Sender<bool>,
-    accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    cdp_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    accept_task: Mutex<Option<crate::rt::JoinHandle<()>>>,
+    cdp_task: Mutex<Option<crate::rt::JoinHandle<()>>>,
 }
 
 impl StreamServer {
@@ -305,6 +313,18 @@ impl StreamServer {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    async fn start_inner(
+        _preferred_port: u16,
+        _client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+        _session_id: String,
+        _allow_port_fallback: bool,
+        _idle_activity: Arc<IdleActivity>,
+    ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
+        Err("stream server is not supported on this platform".to_string())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn start_inner(
         preferred_port: u16,
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -358,7 +378,7 @@ impl StreamServer {
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
         let frame_watch_accept = frame_watch_rx.clone();
-        let accept_task = tokio::spawn(async move {
+        let accept_task = crate::rt::spawn(async move {
             websocket::accept_loop(
                 listener,
                 frame_tx_clone,
@@ -393,7 +413,7 @@ impl StreamServer {
         let recording_bg = recording.clone();
         let frame_watch_bg = frame_watch_tx.clone();
         let screencast_cfg_bg = screencast_config.clone();
-        let cdp_task = tokio::spawn(async move {
+        let cdp_task = crate::rt::spawn(async move {
             cdp_loop::cdp_event_loop(
                 frame_tx_bg,
                 frame_watch_bg,
@@ -738,7 +758,7 @@ mod tests {
     /// broken server fails instead of hanging.
     async fn next_frame(ws: &mut WsClient) -> Value {
         loop {
-            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            let msg = crate::rt::timeout(std::time::Duration::from_secs(5), ws.next())
                 .await
                 .expect("timed out waiting for frame")
                 .expect("stream ended")
@@ -836,14 +856,14 @@ mod tests {
                 r#"{{"type":"frame","seq":{},"data":"{}"}}"#,
                 seq, big
             ));
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            crate::rt::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
             Arc::strong_count(&idle) > connected_floor,
             "a connected client should hold the activity clock"
         );
 
-        let teardown = tokio::time::Instant::now();
+        let teardown = crate::rt::Instant::now();
         server.shutdown().await;
         let took = teardown.elapsed();
         assert!(
@@ -859,7 +879,7 @@ mod tests {
             if Arc::strong_count(&idle) == 1 {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            crate::rt::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
             Arc::strong_count(&idle),
@@ -911,9 +931,9 @@ mod tests {
         .expect("server start");
 
         let mut ws = connect_client_to(server.port(), "/?maxFps=1").await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(150)).await;
 
-        let sent_at = tokio::time::Instant::now();
+        let sent_at = crate::rt::Instant::now();
         server.broadcast_frame(r#"{"type":"frame","seq":1,"data":"first"}"#);
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("seq").and_then(|v| v.as_u64()), Some(1));
@@ -943,7 +963,7 @@ mod tests {
             .await
             .expect("send config");
         // Let the reader task apply the config before frames start flowing.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         server.broadcast_frame(r#"{"type":"frame","data":"first"}"#);
         let frame = next_frame(&mut ws).await;
@@ -961,13 +981,13 @@ mod tests {
     /// Assert no frame arrives within `ms`. A plain `next_frame` would pass on
     /// the very behavior these tests forbid.
     async fn expect_no_frame(ws: &mut WsClient, ms: u64) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let deadline = crate::rt::Instant::now() + std::time::Duration::from_millis(ms);
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(crate::rt::Instant::now());
             if remaining.is_zero() {
                 return;
             }
-            match tokio::time::timeout(remaining, ws.next()).await {
+            match crate::rt::timeout(remaining, ws.next()).await {
                 Err(_) => return,
                 Ok(Some(Ok(Message::Text(text)))) => {
                     let parsed: Value = serde_json::from_str(&text).expect("valid json");
@@ -1002,7 +1022,7 @@ mod tests {
         ))
         .await
         .expect("send config");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         server.broadcast_frame(r#"{"type":"frame","seq":1,"data":"one"}"#);
         let frame = next_frame(&mut ws).await;
@@ -1080,7 +1100,7 @@ mod tests {
         ws.send(Message::Text(r#"{"type":"ack","seq":9999999}"#.to_string()))
             .await
             .expect("send premature ack");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         // Delivery continues: each frame is covered by the watermark already
         // banked, so the writer never blocks on it.
@@ -1115,7 +1135,7 @@ mod tests {
         ))
         .await
         .expect("send config");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         server.broadcast_frame(r#"{"type":"frame","seq":1,"data":"one"}"#);
         let frame = next_frame(&mut ws).await;
@@ -1210,7 +1230,7 @@ mod tests {
                 .await
                 .expect("send config");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         server.broadcast_frame(r#"{"type":"frame","seq":9,"data":"live"}"#);
         let frame = next_frame(&mut ws).await;
@@ -1233,7 +1253,7 @@ mod tests {
         let mut ws = connect_client(server.port()).await;
         // Timed, because asserting only that both frames arrive passes at any
         // rate: a 1 fps default still delivers two, a second apart.
-        let started = tokio::time::Instant::now();
+        let started = crate::rt::Instant::now();
         server.broadcast_frame(r#"{"type":"frame","data":"one"}"#);
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("one"));
@@ -1269,7 +1289,7 @@ mod tests {
         ws.send(Message::Text(r#"{"type":"config","maxFps":1}"#.to_string()))
             .await
             .expect("send config");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(200)).await;
 
         // First frame is immediate and arms next_allowed = now + 1s (1 fps).
         server.broadcast_frame(r#"{"type":"frame","data":"a"}"#);
@@ -1286,9 +1306,9 @@ mod tests {
         ws.send(Message::Text(r#"{"type":"config","maxFps":0}"#.to_string()))
             .await
             .expect("send config uncapped");
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        crate::rt::sleep(std::time::Duration::from_millis(150)).await;
 
-        let t0 = std::time::Instant::now();
+        let t0 = crate::rt::Instant::now();
         server.broadcast_frame(r#"{"type":"frame","data":"b"}"#);
         assert_eq!(
             next_frame(&mut ws)
