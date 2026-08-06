@@ -38,6 +38,8 @@ mod imp {
     use futures_util::future::{AbortHandle, Abortable};
     use std::future::Future;
     use std::ops::{Add, AddAssign, Sub, SubAssign};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     /// Monotonic-enough instant backed by `Date.now()`.
     #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -232,6 +234,7 @@ mod imp {
     pub struct JoinHandle<T> {
         receiver: tokio::sync::oneshot::Receiver<T>,
         abort_handle: AbortHandle,
+        finished: Arc<AtomicBool>,
     }
 
     impl<T> JoinHandle<T> {
@@ -240,7 +243,7 @@ mod imp {
         }
 
         pub fn is_finished(&self) -> bool {
-            self.abort_handle.is_aborted()
+            self.finished.load(Ordering::Acquire) || self.abort_handle.is_aborted()
         }
     }
 
@@ -266,14 +269,19 @@ mod imp {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let task = Abortable::new(future, abort_registration);
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = finished.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(output) = task.await {
+            let result = task.await;
+            finished_flag.store(true, Ordering::Release);
+            if let Ok(output) = result {
                 let _ = sender.send(output);
             }
         });
         JoinHandle {
             receiver,
             abort_handle,
+            finished,
         }
     }
 

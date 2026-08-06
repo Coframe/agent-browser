@@ -1,10 +1,12 @@
+// Most of this module supports the native-only run_read implementation below.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
+
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use url::Url;
 
@@ -187,31 +189,32 @@ struct LlmsLink {
     url: Url,
 }
 
+/// The read command requires a client-level timeout and a redirect policy
+/// that re-validates every hop against the domain allowlist; reqwest's wasm
+/// backend supports neither, so the command is native-only.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_read(_raw_url: &str, _options: ReadOptions) -> Result<Value, String> {
+    Err("the read command is not supported on this platform".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, String> {
     let target = normalize_url(raw_url)?;
     check_allowed_url_for_options(&target, &options)?;
-    #[cfg(not(target_arch = "wasm32"))]
-    let client = {
-        let redirect_allowed_domain_sets = allowed_domain_sets_for_options(&options);
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() > 10 {
-                attempt.error("too many redirects")
-            } else if let Err(e) =
-                check_allowed_url_sets(attempt.url(), &redirect_allowed_domain_sets)
-            {
-                attempt.error(e)
-            } else {
-                attempt.follow()
-            }
-        });
-        Client::builder()
-            .timeout(Duration::from_millis(options.timeout_ms))
-            .redirect(redirect_policy)
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
-    };
-    #[cfg(target_arch = "wasm32")]
+    let redirect_allowed_domain_sets = allowed_domain_sets_for_options(&options);
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > 10 {
+            attempt.error("too many redirects")
+        } else if let Err(e) = check_allowed_url_sets(attempt.url(), &redirect_allowed_domain_sets)
+        {
+            attempt.error(e)
+        } else {
+            attempt.follow()
+        }
+    });
     let client = Client::builder()
+        .timeout(Duration::from_millis(options.timeout_ms))
+        .redirect(redirect_policy)
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -555,7 +558,6 @@ fn check_allowed_url(url: &Url, allowed_domains: &[String]) -> Result<(), String
     ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn allowed_domain_sets_for_options(options: &ReadOptions) -> Vec<Vec<String>> {
     let mut sets = Vec::new();
     if !options.allowed_domains.is_empty() {
@@ -579,7 +581,6 @@ fn check_allowed_url_for_options(url: &Url, options: &ReadOptions) -> Result<(),
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn check_allowed_url_sets(url: &Url, allowed_domain_sets: &[Vec<String>]) -> Result<(), String> {
     for domains in allowed_domain_sets {
         check_allowed_url(url, domains)?;
@@ -1428,7 +1429,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let _ = stream.read(&mut buf).await.unwrap_or(0);
@@ -1467,7 +1468,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let _ = stream.read(&mut buf).await.unwrap_or(0);
@@ -1545,7 +1546,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -1573,7 +1574,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             for expected_path in ["/docs/intro", "/docs/intro.md"] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut buf = [0_u8; 2048];
@@ -1609,7 +1610,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     break;
@@ -1654,7 +1655,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             for expected_path in [
                 "/docs/intro",
                 "/docs/intro.md",
@@ -1703,7 +1704,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             for expected_path in ["/docs/intro/llms.txt", "/docs/llms.txt"] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut buf = [0_u8; 2048];
@@ -1749,7 +1750,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             for expected_path in ["/docs/intro/llms-full.txt", "/docs/llms-full.txt"] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut buf = [0_u8; 2048];
@@ -1799,7 +1800,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -1829,7 +1830,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -1863,7 +1864,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}/docs/intro", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
@@ -1897,7 +1898,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0_u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
