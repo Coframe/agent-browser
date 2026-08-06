@@ -6635,7 +6635,8 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
 
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
         .map_err(|e| format!("Failed to decode PDF: {}", e))?;
-    std::fs::write(&save_path, &bytes).map_err(|e| format!("Failed to save PDF: {}", e))?;
+    crate::artifacts::write(&save_path, &bytes)
+        .map_err(|e| format!("Failed to save PDF: {}", e))?;
 
     Ok(json!({ "path": save_path }))
 }
@@ -9266,7 +9267,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
 
     let output_path = cmd.get("output").and_then(|v| v.as_str());
     if let (Some(out_path), Some(ref diff_data)) = (output_path, &result.diff_image) {
-        std::fs::write(out_path, diff_data)
+        crate::artifacts::write(out_path, diff_data)
             .map_err(|e| format!("Failed to write diff image: {}", e))?;
     }
 
@@ -9387,7 +9388,8 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let har_str = serde_json::to_string_pretty(&har)
         .map_err(|e| format!("Failed to serialize HAR: {}", e))?;
-    std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
+    crate::artifacts::write(&path, har_str.as_bytes())
+        .map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     Ok(json!({ "path": path, "requestCount": request_count }))
 }

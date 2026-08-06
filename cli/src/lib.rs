@@ -1,3 +1,4 @@
+pub mod artifacts;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod chat;
 pub mod color;
