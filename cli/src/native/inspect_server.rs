@@ -75,7 +75,7 @@ impl InspectServer {
 
         let proxy = Arc::new(proxy_handle);
 
-        let handle = crate::rt::spawn(accept_loop(
+        let handle = tokio::spawn(accept_loop(
             listener,
             proxy,
             target_id,
@@ -116,7 +116,7 @@ async fn accept_loop(
         let tid = target_id.clone();
         let chp = chrome_host_port.clone();
 
-        crate::rt::spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, proxy, tid, chp, proxy_port).await {
                 let _ = writeln!(std::io::stderr(), "[inspect] connection error: {}", e);
             }
@@ -234,7 +234,7 @@ async fn handle_ws_proxy(
         .map_err(|e| format!("Failed to send attachToTarget: {}", e))?;
 
     // Wait for the attachToTarget response to extract the session ID
-    let session_id = crate::rt::timeout(std::time::Duration::from_secs(5), async {
+    let session_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Ok(raw_msg) = raw_rx.recv().await {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_msg.text) {
                 if val.get("id").and_then(|v| v.as_i64()) == Some(attach_id) {
@@ -263,7 +263,7 @@ async fn handle_ws_proxy(
     let session_id_clone = session_id.clone();
 
     // Chrome -> DevTools: forward messages matching our session, strip sessionId
-    let mut chrome_to_devtools = crate::rt::spawn(async move {
+    let mut chrome_to_devtools = tokio::spawn(async move {
         loop {
             let raw_msg = match raw_rx.recv().await {
                 Ok(msg) => msg,
@@ -294,7 +294,7 @@ async fn handle_ws_proxy(
     // DevTools -> Chrome: inject sessionId and forward
     let proxy_for_send = proxy.clone();
     let session_id_for_send = session_id.clone();
-    let mut devtools_to_chrome = crate::rt::spawn(async move {
+    let mut devtools_to_chrome = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             let text = match msg {
                 Message::Text(t) => t,

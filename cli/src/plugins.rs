@@ -246,7 +246,7 @@ async fn invoke_plugin_process(
     }
     drop(child.stdin.take());
 
-    let output = crate::rt::timeout(
+    let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         child.wait_with_output(),
     )
@@ -1383,7 +1383,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         .unwrap_err();
 
         assert!(err.contains("timed out"));
-        crate::rt::sleep(std::time::Duration::from_millis(2_500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
         assert!(!marker_path.exists());
     }
 }

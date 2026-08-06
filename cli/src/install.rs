@@ -269,7 +269,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
                 attempt + 1,
                 max_retries
             );
-            crate::rt::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
         }
 
         let resp = match client.get(url).send().await {
@@ -929,7 +929,7 @@ mod tests {
         let body = b"fake-zip-content";
         let resp = http_response(200, "OK", body);
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_once(&listener, &resp).await;
         });
 
@@ -946,7 +946,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let resp = http_response(404, "Not Found", b"not found");
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_once(&listener, &resp).await;
         });
 
@@ -967,7 +967,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             // First two attempts: 500
             let r500 = http_response(500, "Internal Server Error", b"error");
             accept_once(&listener, &r500).await;
@@ -993,7 +993,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             let r500 = http_response(500, "Internal Server Error", b"error");
             // All 3 attempts get 500
             accept_once(&listener, &r500).await;
@@ -1019,7 +1019,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let resp = http_response(403, "Forbidden", b"forbidden");
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             // Only one request should arrive (no retries for 4xx)
             accept_once(&listener, &resp).await;
         });
@@ -1037,7 +1037,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let resp = http_response(200, "OK", b"ok");
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             let req = accept_with_ua_check(&listener, &resp).await;
             req
         });

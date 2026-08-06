@@ -250,7 +250,7 @@ async fn http_request(method: &str, url: &str, body: Option<&Value>) -> Result<V
     let path = parsed.path();
 
     let addr = format!("{}:{}", host, port);
-    let stream = crate::rt::timeout(
+    let stream = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::TcpStream::connect(&addr),
     )

@@ -331,7 +331,7 @@ mod tests {
     }
 
     async fn serve_json_version_once_after_delay(port: u16, delay_ms: u64, body: &'static str) {
-        crate::rt::sleep(Duration::from_millis(delay_ms)).await;
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let listener = TokioTcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = [0u8; 1024];
@@ -348,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn waits_for_ready_without_logs() {
         let port = unused_port();
-        crate::rt::spawn(serve_json_version_once_after_delay(
+        tokio::spawn(serve_json_version_once_after_delay(
             port,
             150,
             r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:9222/"}"#,
@@ -407,7 +407,7 @@ mod tests {
 
         let timeout = Duration::from_millis(300);
         let (logs, _drainers) = start_log_drainers(&mut child).unwrap();
-        let err = crate::rt::timeout(
+        let err = tokio::time::timeout(
             Duration::from_secs(2),
             wait_for_lightpanda_ready(&mut child, port, &logs, timeout),
         )

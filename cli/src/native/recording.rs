@@ -156,7 +156,7 @@ pub fn spawn_recording_task(
     shared_count: Arc<AtomicU64>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> crate::rt::JoinHandle<Result<(), String>> {
-    crate::rt::spawn(async move {
+    tokio::spawn(async move {
         let mut cancel_rx = std::pin::pin!(cancel_rx);
 
         let mut ffmpeg = build_ffmpeg_command(&output_path).spawn().map_err(|e| {
@@ -171,8 +171,8 @@ pub fn spawn_recording_task(
             .take()
             .ok_or_else(|| "Failed to open ffmpeg stdin".to_string())?;
 
-        let mut interval = crate::rt::interval(Duration::from_millis(CAPTURE_INTERVAL_MS));
-        interval.set_missed_tick_behavior(crate::rt::MissedTickBehavior::Skip);
+        let mut interval = tokio::time::interval(Duration::from_millis(CAPTURE_INTERVAL_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let params = CaptureScreenshotParams {
             format: Some("jpeg".to_string()),

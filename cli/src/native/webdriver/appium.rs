@@ -160,7 +160,7 @@ async fn is_appium_running(_port: u16) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 async fn is_appium_running(port: u16) -> bool {
     let addr = format!("127.0.0.1:{}", port);
-    crate::rt::timeout(
+    tokio::time::timeout(
         Duration::from_secs(2),
         tokio::net::TcpStream::connect(&addr),
     )

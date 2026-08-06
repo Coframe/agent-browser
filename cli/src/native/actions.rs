@@ -11587,10 +11587,10 @@ mod tests {
 
     async fn start_webdriver_response_server(
         responses: Vec<(&'static str, Value)>,
-    ) -> (u16, crate::rt::JoinHandle<usize>) {
+    ) -> (u16, tokio::task::JoinHandle<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = crate::rt::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut handled = 0;
             for (expected_path, body) in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -11697,10 +11697,10 @@ mod tests {
     fn test_autosave_waits_for_quiet_period_after_command() {
         let mut state = DaemonState::new();
 
-        state.last_command_finished = Some(crate::rt::Instant::now());
+        state.last_command_finished = Some(std::time::Instant::now());
         assert!(!autosave_due(&state, 30_000));
 
-        state.last_command_finished = crate::rt::Instant::now().checked_sub(
+        state.last_command_finished = std::time::Instant::now().checked_sub(
             std::time::Duration::from_millis(AUTOSAVE_QUIET_PERIOD_MS + 1_000),
         );
         assert!(state.last_command_finished.is_some());
@@ -11711,11 +11711,11 @@ mod tests {
     fn test_autosave_enforces_min_interval_between_attempts() {
         let mut state = DaemonState::new();
 
-        state.last_autosave_attempt = Some(crate::rt::Instant::now());
+        state.last_autosave_attempt = Some(std::time::Instant::now());
         assert!(!autosave_due(&state, 30_000));
 
         state.last_autosave_attempt =
-            crate::rt::Instant::now().checked_sub(std::time::Duration::from_secs(31));
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(31));
         assert!(state.last_autosave_attempt.is_some());
         assert!(autosave_due(&state, 30_000));
     }

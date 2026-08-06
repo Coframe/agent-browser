@@ -172,7 +172,7 @@ async fn discover_cdp_ws(_host: &str, _port: u16, _timeout: Duration) -> Result<
 async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
     let ws_url = format!("ws://{}:{}/devtools/browser", bracket_ipv6(host), port);
 
-    crate::rt::timeout(timeout, async {
+    tokio::time::timeout(timeout, async {
         let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
             .await
             .map_err(|e| format!("WebSocket connect failed at {}: {}", ws_url, e))?;
@@ -242,7 +242,7 @@ mod tests {
     async fn discovers_ws_url_from_json_version() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_http(
                 &listener,
                 &http_200(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#),
@@ -259,7 +259,7 @@ mod tests {
     async fn returns_error_when_version_returns_invalid_json() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_http(&listener, &http_200("not-json")).await;
             // /json/list and ws fallback both fail (server closes)
         });
@@ -273,7 +273,7 @@ mod tests {
     async fn falls_back_to_json_list_on_version_404() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_http(&listener, HTTP_404).await;
             accept_http(
                 &listener,
@@ -291,7 +291,7 @@ mod tests {
     async fn falls_back_to_ws_when_http_returns_404() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             // /json/version -> 404, /json/list -> 404
             accept_http(&listener, HTTP_404).await;
             accept_http(&listener, HTTP_404).await;
@@ -378,7 +378,7 @@ mod tests {
     async fn discover_preserves_query_params() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             accept_http(
                 &listener,
                 &http_200(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#),

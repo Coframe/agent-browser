@@ -49,7 +49,7 @@ impl ChromeProcess {
     /// falling back to kill() if it doesn't exit within the timeout.
     /// This allows Chrome to flush cookies and other state to the user-data-dir.
     pub fn wait_or_kill(&mut self, timeout: Duration) {
-        let start = crate::rt::Instant::now();
+        let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(50);
 
         while start.elapsed() < timeout {
@@ -248,7 +248,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
         libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    let deadline = crate::rt::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let mut chunk = [0u8; 16];
@@ -271,7 +271,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if crate::rt::Instant::now() >= deadline {
+                if std::time::Instant::now() >= deadline {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -682,7 +682,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     })?;
 
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
-    let deadline = crate::rt::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
     // Primary path: use DevToolsActivePort written into user-data-dir.
     // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
@@ -733,11 +733,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
 fn wait_for_devtools_active_port(
     child: &mut Child,
     user_data_dir: &Path,
-    deadline: crate::rt::Instant,
+    deadline: std::time::Instant,
 ) -> Result<String, String> {
     let poll_interval = Duration::from_millis(50);
 
-    while crate::rt::Instant::now() <= deadline {
+    while std::time::Instant::now() <= deadline {
         if let Ok(Some(status)) = child.try_wait() {
             // Chrome exited before writing DevToolsActivePort -- report the
             // exit code so the caller can surface it alongside stderr output.
@@ -764,13 +764,13 @@ fn wait_for_devtools_active_port(
 
 fn wait_for_ws_url_until(
     reader: BufReader<std::process::ChildStderr>,
-    deadline: crate::rt::Instant,
+    deadline: std::time::Instant,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
     let mut stderr_lines: Vec<String> = Vec::new();
 
     for line in reader.lines() {
-        if crate::rt::Instant::now() > deadline {
+        if std::time::Instant::now() > deadline {
             return Err(chrome_launch_error(
                 "Timeout waiting for Chrome DevTools URL",
                 &stderr_lines,
@@ -1013,7 +1013,7 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
     use tokio_tungstenite::tungstenite::Message;
 
     let timeout = Duration::from_secs(2);
-    let result = crate::rt::timeout(timeout, async {
+    let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
         ws.send(Message::Text(cmd.into())).await.ok()?;
@@ -2436,7 +2436,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let ws_path = "/devtools/browser/test-uuid-1234".to_string();
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             // accept: verify_ws_endpoint() WebSocket handshake
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -2473,7 +2473,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let server = crate::rt::spawn(async move {
+        let server = tokio::spawn(async move {
             // 1st accept: verify_ws_endpoint() ws_path probe — reject (just close)
             let (s1, _) = listener.accept().await.unwrap();
             drop(s1);
