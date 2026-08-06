@@ -527,6 +527,17 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Self::from_client(client, ws_url, direct_page).await
+    }
+
+    /// Build a manager around an already-connected CDP client, e.g. one
+    /// created via [`CdpClient::from_transport`] on hosts that supply their
+    /// own WebSocket. `ws_url` is informational (reported by `cdp_url`).
+    pub async fn from_client(
+        client: Arc<CdpClient>,
+        ws_url: String,
+        direct_page: bool,
+    ) -> Result<Self, String> {
         let mut manager = Self {
             client,
             browser_process: None,
