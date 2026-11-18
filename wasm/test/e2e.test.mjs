@@ -150,7 +150,7 @@ test("runs in workerd with the same output as in Node.js", async () => {
 test("matches the native binary", { skip: nativePath() ? false : "set AGENT_BROWSER_NATIVE to compare" }, async () => {
   const chrome = await startChrome();
   try {
-    const native = runNative(nativePath(), chrome.cdp, script);
+    const native = await runNative(nativePath(), chrome.cdp, script);
     const expected = byCommand(native.results, { site: site.url, home: native.home });
     const actual = byCommand(nodeResults, { site: site.url, home: HOME })
       // The wasm run used cwd /work inside its own file system.

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -95,18 +95,31 @@ export function commands(site) {
     .map((line) => line.match(/"[^"]*"|\S+/g).map((arg) => arg.replace(/^"|"$/g, "")));
 }
 
-/** Runs the script through the native binary in a scratch home directory. */
-export function runNative(binary, cdp, script) {
+function run(binary, argv, options) {
+  return new Promise((resolve) => {
+    const child = spawn(binary, argv, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("exit", (exitCode) => resolve({ exitCode, stdout, stderr }));
+  });
+}
+
+/**
+ * Runs the script through the native binary in a scratch home directory.
+ * It must not block the event loop: the fixture site is served by this
+ * process.
+ */
+export async function runNative(binary, cdp, script) {
   const home = mkdtempSync(join(tmpdir(), "agent-browser-wasm-native-"));
   const env = {
     PATH: process.env.PATH, HOME: home, TMPDIR: home, NO_COLOR: "1",
     AGENT_BROWSER_CDP: cdp, AGENT_BROWSER_SOCKET_DIR: join(home, ".agent-browser"),
   };
-  const results = script.map((argv) => {
-    const run = spawnSync(binary, argv, { env, cwd: home, encoding: "utf8", timeout: 60_000 });
-    return { exitCode: run.status, stdout: run.stdout, stderr: run.stderr };
-  });
-  spawnSync(binary, ["close", "--all"], { env, cwd: home });
+  const results = [];
+  for (const argv of script) results.push(await run(binary, argv, { env, cwd: home }));
+  await run(binary, ["close", "--all"], { env, cwd: home });
   rmSync(home, { recursive: true, force: true, maxRetries: 5 });
   return { results, home };
 }
