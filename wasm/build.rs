@@ -20,7 +20,10 @@ const UPSTREAM: &str = "../cli";
 
 enum Edit {
     /// Replace every occurrence, in every file. Must match at least once.
-    Everywhere { from: &'static str, to: &'static str },
+    Everywhere {
+        from: &'static str,
+        to: &'static str,
+    },
     /// Replace the single occurrence in `file`.
     Replace {
         file: &'static str,
@@ -245,7 +248,11 @@ fn generate_sources(out: &Path) {
                 expect_once(file, text, from);
                 *text = text.replacen(from, to, 1);
             }
-            Edit::After { file, anchor, text: insert } => {
+            Edit::After {
+                file,
+                anchor,
+                text: insert,
+            } => {
                 let text = source(&mut files, file);
                 expect_once(file, text, anchor);
                 let at = text.find(anchor).unwrap() + anchor.len();
@@ -301,7 +308,9 @@ fn check_dependencies() {
     let missing: Vec<_> = theirs.iter().filter(|name| !ours.contains(name)).collect();
     if !missing.is_empty() {
         eprintln!("\nagent-browser-wasm: cli/Cargo.toml depends on {missing:?}, wasm/Cargo.toml does not.");
-        eprintln!("Add each crate to wasm/Cargo.toml, or a shim under wasm/shims if it needs an OS.\n");
+        eprintln!(
+            "Add each crate to wasm/Cargo.toml, or a shim under wasm/shims if it needs an OS.\n"
+        );
         std::process::exit(1);
     }
 }
@@ -318,7 +327,10 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     check_dependencies();
     generate_sources(&out);
-    println!("cargo:rustc-env=AGENT_BROWSER_VERSION={}", upstream_version());
+    println!(
+        "cargo:rustc-env=AGENT_BROWSER_VERSION={}",
+        upstream_version()
+    );
     println!("cargo:rerun-if-changed=build.rs");
     upstream::run();
 }

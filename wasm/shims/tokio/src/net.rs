@@ -121,7 +121,11 @@ impl AsyncRead for TcpStream {
 }
 
 impl AsyncWrite for TcpStream {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Poll::Ready(match &self.conn {
             Some(conn) => conn.write(buf),
             None => Err(io::ErrorKind::NotConnected.into()),
@@ -162,7 +166,8 @@ impl TcpListener {
             .next()
             .map(|addr| addr.port())
             .ok_or(io::ErrorKind::InvalidInput)?;
-        agent_browser_host::tcp_listen(port).map(|listener| TcpListener(std::sync::Mutex::new(listener)))
+        agent_browser_host::tcp_listen(port)
+            .map(|listener| TcpListener(std::sync::Mutex::new(listener)))
     }
 
     pub fn from_std(_listener: std::net::TcpListener) -> io::Result<Self> {
@@ -179,7 +184,10 @@ impl TcpListener {
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        Ok(SocketAddr::from(([127, 0, 0, 1], self.0.lock().unwrap().port())))
+        Ok(SocketAddr::from((
+            [127, 0, 0, 1],
+            self.0.lock().unwrap().port(),
+        )))
     }
 }
 

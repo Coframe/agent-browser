@@ -34,10 +34,22 @@ mod sys {
         pub fn event_read(buffer: *mut u8);
         pub fn timer_set(id: u32, ms: f64);
         pub fn timer_clear(id: u32);
-        pub fn ws_open(id: u32, url: *const u8, url_len: usize, headers: *const u8, headers_len: usize);
+        pub fn ws_open(
+            id: u32,
+            url: *const u8,
+            url_len: usize,
+            headers: *const u8,
+            headers_len: usize,
+        );
         pub fn ws_send(id: u32, text: *const u8, text_len: usize) -> i32;
         pub fn ws_close(id: u32);
-        pub fn fetch_start(id: u32, request: *const u8, request_len: usize, body: *const u8, body_len: usize);
+        pub fn fetch_start(
+            id: u32,
+            request: *const u8,
+            request_len: usize,
+            body: *const u8,
+            body_len: usize,
+        );
         pub fn fetch_abort(id: u32);
         pub fn tcp_listen(port: u32) -> i32;
         pub fn tcp_unlisten(port: u32);
@@ -239,7 +251,10 @@ pub struct WebSocket {
 
 /// Asks the host to open a WebSocket. The first event is [`WsEvent::Open`]
 /// or [`WsEvent::Error`].
-pub fn ws_open(url: &str, headers: &[(String, String)]) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
+pub fn ws_open(
+    url: &str,
+    headers: &[(String, String)],
+) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
     let id = next_id();
     let (tx, events) = mpsc::unbounded();
     SOCKETS.with(|sockets| sockets.borrow_mut().insert(id, tx));
@@ -311,7 +326,8 @@ fn parse_fetch(payload: &[u8]) -> FetchResult {
     let status = payload.get(..4).ok_or_else(malformed)?;
     let status = u32::from_le_bytes([status[0], status[1], status[2], status[3]]);
     let head_len = payload.get(4..8).ok_or_else(malformed)?;
-    let head_len = u32::from_le_bytes([head_len[0], head_len[1], head_len[2], head_len[3]]) as usize;
+    let head_len =
+        u32::from_le_bytes([head_len[0], head_len[1], head_len[2], head_len[3]]) as usize;
     let head = payload.get(8..8 + head_len).ok_or_else(malformed)?;
     let body = &payload[8 + head_len..];
     if status == 0 {
