@@ -11,5 +11,8 @@ name = "reqwest"
 [dependencies]
 real_reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
 rustls = { package = "agent-browser-shim-rustls", path = "../rustls" }
-url = "2"
 http = "1"
+bytes = "1"
+futures-util = "0.3"
+send_wrapper = { version = "0.6", features = ["futures"] }
+serde = "1"

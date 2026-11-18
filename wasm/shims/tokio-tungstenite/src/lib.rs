@@ -219,6 +219,24 @@ where
     R: IntoClientRequest + Unpin,
 {
     let request = request.into_client_request()?;
+    // JS values are `!Send` and callers await this inside `Send` futures.
+    // A wasm32 host runs on one thread, which `SendWrapper` checks.
+    let key = send_wrapper::SendWrapper::new(open_socket(request)).await?;
+    let (key, events) = key;
+    let stream = WebSocketStream {
+        inner: MaybeTlsStream::Plain(tokio::net::TcpStream::placeholder()),
+        key,
+        events,
+        closed: false,
+    };
+    Ok((stream, Response::new(None)))
+}
+
+type Events = mpsc::UnboundedReceiver<Result<Message, Error>>;
+
+async fn open_socket(
+    request: tungstenite::handshake::client::Request,
+) -> Result<(u64, Events), Error> {
     let url = request.uri().to_string();
     let headers = js_sys::Array::new();
     for (name, value) in request.headers() {
@@ -235,23 +253,24 @@ where
         .ok_or_else(|| io_error("no WebSocket connector is registered on this platform"))?;
 
     let (tx, events) = mpsc::unbounded_channel();
-    let on_event = Closure::<dyn FnMut(JsValue, JsValue)>::new(move |kind: JsValue, data: JsValue| {
-        let event = match kind.as_string().as_deref() {
-            Some("message") => match data.as_string() {
-                Some(text) => Ok(Message::Text(text)),
-                None => return,
-            },
-            Some("close") => Ok(Message::Close(data.as_string().map(|reason| {
-                tungstenite::protocol::CloseFrame {
-                    code: tungstenite::protocol::frame::coding::CloseCode::Normal,
-                    reason: reason.into(),
-                }
-            }))),
-            _ => Err(io_error(js_message(&data))),
-        };
-        let _ = tx.send(event);
-    })
-    .into_js_value();
+    let on_event =
+        Closure::<dyn FnMut(JsValue, JsValue)>::new(move |kind: JsValue, data: JsValue| {
+            let event = match kind.as_string().as_deref() {
+                Some("message") => match data.as_string() {
+                    Some(text) => Ok(Message::Text(text)),
+                    None => return,
+                },
+                Some("close") => Ok(Message::Close(data.as_string().map(|reason| {
+                    tungstenite::protocol::CloseFrame {
+                        code: tungstenite::protocol::frame::coding::CloseCode::Normal,
+                        reason: reason.into(),
+                    }
+                }))),
+                _ => Err(io_error(js_message(&data))),
+            };
+            let _ = tx.send(event);
+        })
+        .into_js_value();
 
     let promise = connector
         .call3(
@@ -271,22 +290,18 @@ where
         *next
     });
     SOCKETS.with(|sockets| sockets.borrow_mut().insert(key, socket));
-
-    let stream = WebSocketStream {
-        inner: MaybeTlsStream::Plain(tokio::net::TcpStream::placeholder()),
-        key,
-        events,
-        closed: false,
-    };
-    let response = Response::new(None);
-    Ok((stream, response))
+    Ok((key, events))
 }
 
 /// Accepting connections needs a listening socket, which this platform lacks.
 pub async fn accept_async<S>(_stream: S) -> Result<WebSocketStream<S>, Error> {
-    Err(io_error("accepting WebSocket connections is not available on this platform"))
+    Err(io_error(
+        "accepting WebSocket connections is not available on this platform",
+    ))
 }
 
 pub async fn accept_hdr_async<S, C>(_stream: S, _callback: C) -> Result<WebSocketStream<S>, Error> {
-    Err(io_error("accepting WebSocket connections is not available on this platform"))
+    Err(io_error(
+        "accepting WebSocket connections is not available on this platform",
+    ))
 }

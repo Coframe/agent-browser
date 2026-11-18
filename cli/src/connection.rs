@@ -194,6 +194,11 @@ pub fn is_pid_alive(pid: u32) -> bool {
         CloseHandle(handle);
         ok && code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Returns true only when the process image name starts with "agent-browser" (case-insensitive), and false when it cannot be determined.
@@ -459,6 +464,11 @@ pub fn daemon_ready(session: &str) -> bool {
             )
             .is_ok()
         })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = session;
+        false
     }
 }
 
@@ -1207,6 +1217,8 @@ fn ensure_daemon_locked(session: &str, opts: &DaemonOptions) -> Result<DaemonRes
         Some(port) => format!("port: 127.0.0.1:{}", port),
         None => format!("no port file in {}", get_socket_dir().display()),
     };
+    #[cfg(not(any(unix, windows)))]
+    let endpoint_info = "no daemon endpoint on this platform";
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -1226,6 +1238,11 @@ fn connect(session: &str) -> Result<Connection, String> {
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = session;
+        Err("Failed to connect: no daemon endpoint on this platform".to_string())
     }
 }
 

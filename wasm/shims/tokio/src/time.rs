@@ -269,6 +269,18 @@ impl Interval {
         self.next = Instant::now() + self.period;
     }
 
+    pub fn reset_at(&mut self, deadline: Instant) {
+        self.next = deadline;
+    }
+
+    pub fn reset_after(&mut self, after: Duration) {
+        self.next = Instant::now() + after;
+    }
+
+    pub fn reset_immediately(&mut self) {
+        self.next = Instant::now();
+    }
+
     pub fn period(&self) -> Duration {
         self.period
     }

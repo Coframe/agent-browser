@@ -290,6 +290,28 @@ fn autosave_interval_ms_from_env() -> u64 {
         .unwrap_or(30_000)
 }
 
+#[cfg(not(any(unix, windows)))]
+async fn bind_listener(
+    _socket_dir: &std::path::Path,
+    _socket_path: &std::path::Path,
+    _session: &str,
+) -> Result<std::convert::Infallible, String> {
+    Err("Failed to bind socket: no daemon endpoint on this platform".to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn run_socket_server(
+    listener: std::convert::Infallible,
+    _session: &str,
+    _stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
+    _stream_server: Option<Arc<StreamServer>>,
+    _idle_activity: Arc<IdleActivity>,
+    _autosave_interval_ms: u64,
+    _startup: Startup,
+) -> Result<(), String> {
+    match listener {}
+}
+
 #[cfg(unix)]
 async fn run_socket_server(
     listener: tokio::net::UnixListener,

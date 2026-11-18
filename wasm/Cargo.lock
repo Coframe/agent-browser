@@ -48,9 +48,12 @@ name = "agent-browser-shim-reqwest"
 version = "0.0.0"
 dependencies = [
  "agent-browser-shim-rustls",
+ "bytes",
+ "futures-util",
  "http",
  "reqwest",
- "url",
+ "send_wrapper",
+ "serde",
 ]
 
 [[package]]
@@ -89,6 +92,7 @@ dependencies = [
  "agent-browser-shim-tokio",
  "futures-util",
  "js-sys",
+ "send_wrapper",
  "tungstenite",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1754,6 +1758,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "send_wrapper"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
+dependencies = [
+ "futures-core",
 ]
 
 [[package]]

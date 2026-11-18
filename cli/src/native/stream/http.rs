@@ -426,6 +426,12 @@ pub(super) async fn relay_command_to_daemon(
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?
     };
 
+    #[cfg(not(any(unix, windows)))]
+    let stream = Err::<tokio::io::Empty, String>(format!(
+        "Failed to connect to daemon: session '{}' has no endpoint on this platform",
+        session_name
+    ))?;
+
     let (reader, mut writer) = tokio::io::split(stream);
 
     writer
