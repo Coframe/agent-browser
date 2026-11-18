@@ -49,6 +49,12 @@ stub_stream!(TcpStream);
 stub_stream!(UnixStream);
 
 impl TcpStream {
+    /// Stands in for the socket under a WebSocket that the JS host owns.
+    #[doc(hidden)]
+    pub fn placeholder() -> Self {
+        Self(())
+    }
+
     pub async fn connect<A>(_addr: A) -> io::Result<Self> {
         Err(unsupported("tcp"))
     }
