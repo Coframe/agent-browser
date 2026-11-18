@@ -64,5 +64,10 @@ lto = false
 codegen-units = 16
 strip = false
 
+# The release build with symbol names kept, for scripts/check-traps.mjs.
+[profile.guard]
+inherits = "release"
+strip = false
+
 [workspace]
 members = [".", "shims/*"]
