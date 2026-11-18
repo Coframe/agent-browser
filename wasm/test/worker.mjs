@@ -2,7 +2,9 @@
 // the results with the files the module wrote.
 import module from "./agent-browser.wasm";
 import { createAgentBrowser } from "./host.mjs";
-import skills from "./skills.json";
+import skillsJson from "./skills.json";
+
+const skills = JSON.parse(skillsJson);
 
 export default {
   async fetch(request) {

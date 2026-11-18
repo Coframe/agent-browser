@@ -10,7 +10,7 @@
     "build": "cargo build --release --target wasm32-wasip1",
     "check:traps": "node scripts/check-traps.mjs",
     "package": "node scripts/package.mjs",
-    "test": "node --test test/"
+    "test": "node --test test/e2e.test.mjs"
   },
   "devDependencies": {
     "miniflare": "4.20260603.0"

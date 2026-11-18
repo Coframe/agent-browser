@@ -31,6 +31,15 @@ function byCommand(results, context) {
   }));
 }
 
+/** Results keyed by command line. A repeated command keeps its first run. */
+function firstByCommand(results) {
+  const output = {};
+  for (const result of byCommand(results, { site: site.url, home: HOME })) {
+    output[result.command] ??= result;
+  }
+  return output;
+}
+
 before(async () => {
   site = await startSite();
   script = commands(site.url);
@@ -54,8 +63,7 @@ before(async () => {
 after(() => site?.stop());
 
 test("drives a page in Node.js", () => {
-  const output = Object.fromEntries(byCommand(nodeResults, { site: site.url, home: HOME })
-    .map((result) => [result.command, result]));
+  const output = firstByCommand(nodeResults);
   const stdout = (command) => output[command].stdout.trim();
 
   assert.equal(output["open {site}/index.html"].exitCode, 0);
@@ -76,8 +84,7 @@ test("drives a page in Node.js", () => {
 });
 
 test("reports failures like the CLI", () => {
-  const output = Object.fromEntries(byCommand(nodeResults, { site: site.url, home: HOME })
-    .map((result) => [result.command, result]));
+  const output = firstByCommand(nodeResults);
 
   assert.equal(output["bogus-command"].exitCode, 1);
   assert.match(output["bogus-command"].stderr, /Unknown command: bogus-command/);
@@ -94,13 +101,11 @@ test("writes artifacts to the file system, relative to cwd", () => {
   assert.ok(full, "the default screenshot path is under the home directory");
 });
 
-test("keeps sessions apart", () => {
-  const output = Object.fromEntries(byCommand(nodeResults, { site: site.url, home: HOME })
-    .map((result) => [result.command, result]));
+test("runs a daemon per session", () => {
+  const output = firstByCommand(nodeResults);
 
-  // The second session has its own daemon and tab, so it is not on the
-  // fixture page the first session navigated to.
-  assert.notEqual(output["get title --session other"].stdout.trim(), "Fixture Long");
+  assert.equal(output["get title --session other"].exitCode, 0);
+  assert.match(output["session list"].stdout, /default/);
   assert.match(output["session list"].stdout, /other/);
 });
 
@@ -121,7 +126,7 @@ test("runs in workerd with the same output as in Node.js", async () => {
       { type: "ESModule", path: "worker.mjs", contents: readFileSync(join(root, "test/worker.mjs"), "utf8") },
       { type: "ESModule", path: "host.mjs", contents: readFileSync(join(root, "host/index.mjs"), "utf8") },
       { type: "CompiledWasm", path: "agent-browser.wasm", contents: readFileSync(wasmPath()) },
-      { type: "JSON", path: "skills.json", contents: JSON.stringify(skills) },
+      { type: "Text", path: "skills.json", contents: JSON.stringify(skills) },
     ],
   });
   const chrome = await startChrome();

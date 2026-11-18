@@ -43,6 +43,7 @@ tab new {site}/form.html
 tab list
 tab t1
 get title
+tab t2
 tab close
 snapshot -c -d 2
 pdf page.pdf
