@@ -79,6 +79,8 @@ AGENT_BROWSER_NATIVE=$PWD/../cli/target/debug/agent-browser pnpm test
 
 4. Review new `#[cfg(windows)]` code in `../cli/src`. A function with one `cfg(unix)` body and one `cfg(windows)` body compiles to an empty function here, which fails at run time, not at build time. `EDITS` widens the Windows arm to every non-Unix target where the arm only needs loopback TCP and files.
 
+A scheduled run of `.github/workflows/wasm.yml` merges upstream `main` into a scratch checkout every day and runs the same build and tests. A red scheduled run means the next sync needs one of the fixes above. A push to `main` publishes the tarball as a GitHub release named `wasm-v<upstream version>-wasm.<run>`, with its SHA-256.
+
 ## What the edits are
 
 `EDITS` in `build.rs` is the full list. There are three kinds:
