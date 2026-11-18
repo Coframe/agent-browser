@@ -1,4 +1,4 @@
-//! Tasks on the JS microtask queue through `wasm_bindgen_futures`.
+//! Tasks on the `agent-browser-host` executor.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -82,8 +82,8 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// Runs `future` on the JS event loop. Unlike tokio, the future does not
-/// have to be `Send`: a wasm32 host has one thread.
+/// Runs `future` on the host executor. Unlike tokio, the future does not
+/// have to be `Send`: the module runs on one thread.
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + 'static,
@@ -93,7 +93,7 @@ where
     let (abort, registration) = FutAbortHandle::new_pair();
     let finished = Arc::new(AtomicBool::new(false));
     let done = finished.clone();
-    wasm_bindgen_futures::spawn_local(async move {
+    agent_browser_host::spawn_local(async move {
         if let Ok(output) = Abortable::new(future, registration).await {
             let _ = tx.send(output);
         }

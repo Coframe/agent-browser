@@ -1,11 +1,10 @@
-//! The subset of the tokio API that agent-browser uses, for wasm32 hosts with
-//! a JS event loop (Cloudflare Workers, browsers).
+//! The subset of the tokio API that agent-browser uses, for wasm32-wasip1.
 //!
 //! The wasm crate depends on this package under the name `tokio`, so upstream
 //! source files compile unchanged. Channels, `select!` and the io traits are
-//! tokio's own. Timers and tasks run on the JS event loop. Sockets, child
-//! processes and runtimes do not exist here: their constructors return
-//! `io::ErrorKind::Unsupported`.
+//! tokio's own. Timers and tasks run on `agent-browser-host`, which the JS
+//! host drives. Sockets, child processes and runtimes do not exist here:
+//! their constructors return `io::ErrorKind::Unsupported`.
 
 pub use real_tokio::{io, join, pin, select, sync, try_join};
 

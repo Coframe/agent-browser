@@ -1,4 +1,4 @@
-//! There is no tokio runtime on this platform: the JS event loop drives
+//! There is no tokio runtime on this platform: the host executor drives
 //! every future. Building one returns `io::ErrorKind::Unsupported`.
 
 use std::future::Future;
@@ -59,7 +59,7 @@ impl std::fmt::Display for TryCurrentError {
 
 impl std::error::Error for TryCurrentError {}
 
-/// Stands in for the runtime handle. `spawn` uses the JS event loop.
+/// Stands in for the runtime handle. `spawn` uses the host executor.
 #[derive(Clone, Debug)]
 pub struct Handle(());
 

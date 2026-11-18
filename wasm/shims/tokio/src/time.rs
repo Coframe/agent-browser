@@ -1,158 +1,112 @@
-//! Timers on `setTimeout` and a clock on `Date.now()`.
+//! Timers on the host event loop and the WASI monotonic clock.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use real_tokio::sync::oneshot;
-use wasm_bindgen::prelude::*;
-
 pub use std::time::Duration;
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_name = setTimeout)]
-    fn set_timeout(callback: &JsValue, ms: f64) -> JsValue;
-    #[wasm_bindgen(js_name = clearTimeout)]
-    fn clear_timeout(id: &JsValue);
-}
-
-thread_local! {
-    // Timer ids are JS values, which are not `Send`. Futures hold a key into
-    // this table instead so they stay `Send` for `async_trait` callers.
-    static TIMERS: RefCell<HashMap<u64, JsValue>> = RefCell::new(HashMap::new());
-    static NEXT_TIMER: RefCell<u64> = const { RefCell::new(0) };
-}
-
-/// A point in time read from `Date.now()`. `std::time::Instant` panics on
-/// wasm32-unknown-unknown.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-pub struct Instant {
-    ms: f64,
-}
-
-impl Eq for Instant {}
-
-impl Ord for Instant {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.ms.total_cmp(&other.ms)
-    }
-}
-
-impl std::hash::Hash for Instant {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ms.to_bits().hash(state)
-    }
-}
+/// A point on the WASI monotonic clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Instant(std::time::Instant);
 
 impl Instant {
     pub fn now() -> Self {
-        Self {
-            ms: js_sys::Date::now(),
-        }
+        Self(std::time::Instant::now())
     }
 
     pub fn elapsed(&self) -> Duration {
-        Self::now().saturating_duration_since(*self)
+        self.0.elapsed()
     }
 
     pub fn duration_since(&self, earlier: Instant) -> Duration {
-        self.saturating_duration_since(earlier)
+        self.0.saturating_duration_since(earlier.0)
     }
 
     pub fn saturating_duration_since(&self, earlier: Instant) -> Duration {
-        Duration::from_secs_f64(((self.ms - earlier.ms) / 1000.0).max(0.0))
+        self.0.saturating_duration_since(earlier.0)
     }
 
     pub fn checked_duration_since(&self, earlier: Instant) -> Option<Duration> {
-        (self.ms >= earlier.ms).then(|| self.saturating_duration_since(earlier))
+        self.0.checked_duration_since(earlier.0)
     }
 
     pub fn checked_add(&self, duration: Duration) -> Option<Instant> {
-        Some(*self + duration)
+        self.0.checked_add(duration).map(Instant)
     }
 
     pub fn checked_sub(&self, duration: Duration) -> Option<Instant> {
-        Some(*self - duration)
+        self.0.checked_sub(duration).map(Instant)
     }
 
-    pub fn into_std(self) -> Instant {
-        self
+    pub fn into_std(self) -> std::time::Instant {
+        self.0
     }
 
-    pub fn from_std(instant: Instant) -> Instant {
-        instant
+    pub fn from_std(instant: std::time::Instant) -> Instant {
+        Instant(instant)
+    }
+}
+
+impl From<std::time::Instant> for Instant {
+    fn from(instant: std::time::Instant) -> Self {
+        Instant(instant)
+    }
+}
+
+impl From<Instant> for std::time::Instant {
+    fn from(instant: Instant) -> Self {
+        instant.0
     }
 }
 
 impl Add<Duration> for Instant {
     type Output = Instant;
     fn add(self, rhs: Duration) -> Instant {
-        Instant {
-            ms: self.ms + rhs.as_secs_f64() * 1000.0,
-        }
+        Instant(self.0 + rhs)
     }
 }
 
 impl AddAssign<Duration> for Instant {
     fn add_assign(&mut self, rhs: Duration) {
-        *self = *self + rhs;
+        self.0 += rhs;
     }
 }
 
 impl Sub<Duration> for Instant {
     type Output = Instant;
     fn sub(self, rhs: Duration) -> Instant {
-        Instant {
-            ms: self.ms - rhs.as_secs_f64() * 1000.0,
-        }
+        Instant(self.0 - rhs)
     }
 }
 
 impl SubAssign<Duration> for Instant {
     fn sub_assign(&mut self, rhs: Duration) {
-        *self = *self - rhs;
+        self.0 -= rhs;
     }
 }
 
 impl Sub<Instant> for Instant {
     type Output = Duration;
     fn sub(self, rhs: Instant) -> Duration {
-        self.saturating_duration_since(rhs)
+        self.0.saturating_duration_since(rhs.0)
     }
 }
 
 /// Future returned by [`sleep`] and [`sleep_until`].
 #[derive(Debug)]
 pub struct Sleep {
-    key: u64,
     deadline: Instant,
-    fired: oneshot::Receiver<()>,
+    timer: agent_browser_host::Timer,
 }
 
 impl Sleep {
     fn arm(deadline: Instant) -> Self {
-        let ms = (deadline.ms - js_sys::Date::now()).max(0.0);
-        let (tx, fired) = oneshot::channel();
-        let key = NEXT_TIMER.with(|next| {
-            let mut next = next.borrow_mut();
-            *next += 1;
-            *next
-        });
-        let callback = Closure::once_into_js(move || {
-            TIMERS.with(|timers| timers.borrow_mut().remove(&key));
-            let _ = tx.send(());
-        });
-        // setTimeout takes a 32-bit delay; a longer one fires immediately.
-        let id = set_timeout(&callback, ms.min(2_147_483_647.0));
-        TIMERS.with(|timers| timers.borrow_mut().insert(key, id));
+        let remaining = deadline.saturating_duration_since(Instant::now());
         Self {
-            key,
             deadline,
-            fired,
+            timer: agent_browser_host::timer(remaining.as_secs_f64() * 1000.0),
         }
     }
 
@@ -169,21 +123,10 @@ impl Sleep {
     }
 }
 
-impl Drop for Sleep {
-    fn drop(&mut self) {
-        // `try_with`: thread-local storage may already be gone at teardown.
-        let _ = TIMERS.try_with(|timers| {
-            if let Some(id) = timers.borrow_mut().remove(&self.key) {
-                clear_timeout(&id);
-            }
-        });
-    }
-}
-
 impl Future for Sleep {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        Pin::new(&mut self.fired).poll(cx).map(|_| ())
+        Pin::new(&mut self.timer).poll(cx)
     }
 }
 

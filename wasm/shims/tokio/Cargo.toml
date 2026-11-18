@@ -3,7 +3,7 @@ name = "agent-browser-shim-tokio"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "The subset of the tokio API that agent-browser uses, implemented on the JS event loop for wasm32 hosts"
+description = "The subset of the tokio API that agent-browser uses, implemented on agent-browser-host for wasm32-wasip1"
 
 [lib]
 name = "tokio"
@@ -11,6 +11,4 @@ name = "tokio"
 [dependencies]
 real_tokio = { package = "tokio", version = "1", features = ["macros", "sync", "io-util"] }
 futures-util = "0.3"
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
+agent-browser-host = { path = "../host" }
