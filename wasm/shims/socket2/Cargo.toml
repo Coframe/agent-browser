@@ -1,0 +1,9 @@
+[package]
+name = "agent-browser-shim-socket2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The subset of the socket2 API that agent-browser uses, as no-ops for wasm32 hosts"
+
+[lib]
+name = "socket2"

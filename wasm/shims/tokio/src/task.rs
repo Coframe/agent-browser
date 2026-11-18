@@ -1,0 +1,203 @@
+//! Tasks on the `agent-browser-host` executor.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use futures_util::future::{AbortHandle as FutAbortHandle, Abortable};
+use real_tokio::sync::oneshot;
+
+#[derive(Debug)]
+pub struct JoinError {
+    cancelled: bool,
+}
+
+impl JoinError {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    pub fn is_panic(&self) -> bool {
+        !self.cancelled
+    }
+}
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.cancelled {
+            "task was cancelled"
+        } else {
+            "task failed"
+        })
+    }
+}
+
+impl std::error::Error for JoinError {}
+
+#[derive(Clone, Debug)]
+pub struct AbortHandle {
+    abort: FutAbortHandle,
+    finished: Arc<AtomicBool>,
+}
+
+impl AbortHandle {
+    pub fn abort(&self) {
+        self.abort.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug)]
+pub struct JoinHandle<T> {
+    result: oneshot::Receiver<T>,
+    handle: AbortHandle,
+}
+
+impl<T> JoinHandle<T> {
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    pub fn abort_handle(&self) -> AbortHandle {
+        self.handle.clone()
+    }
+}
+
+impl<T> Future for JoinHandle<T> {
+    type Output = Result<T, JoinError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let cancelled = self.handle.abort.is_aborted();
+        Pin::new(&mut self.result)
+            .poll(cx)
+            .map(|result| result.map_err(|_| JoinError { cancelled }))
+    }
+}
+
+/// Runs `future` on the host executor. Unlike tokio, the future does not
+/// have to be `Send`: the module runs on one thread.
+pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: Future + 'static,
+    F::Output: 'static,
+{
+    let (tx, result) = oneshot::channel();
+    let (abort, registration) = FutAbortHandle::new_pair();
+    let finished = Arc::new(AtomicBool::new(false));
+    let done = finished.clone();
+    agent_browser_host::spawn_local(async move {
+        if let Ok(output) = Abortable::new(future, registration).await {
+            let _ = tx.send(output);
+        }
+        done.store(true, Ordering::SeqCst);
+    });
+    JoinHandle {
+        result,
+        handle: AbortHandle { abort, finished },
+    }
+}
+
+/// Runs `f` inline: there is no second thread to block.
+pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
+where
+    F: FnOnce() -> T + 'static,
+    T: 'static,
+{
+    spawn(async move { f() })
+}
+
+pub async fn yield_now() {
+    struct Yield(bool);
+    impl Future for Yield {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+    Yield(false).await
+}
+
+/// A set of tasks that are aborted when the set is dropped.
+#[derive(Debug)]
+pub struct JoinSet<T> {
+    tasks: Vec<JoinHandle<T>>,
+}
+
+impl<T> Default for JoinSet<T> {
+    fn default() -> Self {
+        Self { tasks: Vec::new() }
+    }
+}
+
+impl<T: 'static> JoinSet<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn spawn<F>(&mut self, future: F) -> AbortHandle
+    where
+        F: Future<Output = T> + 'static,
+    {
+        let handle = spawn(future);
+        let abort = handle.abort_handle();
+        self.tasks.push(handle);
+        abort
+    }
+
+    /// Waits for the next task to finish. Returns `None` when the set is empty.
+    pub async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        std::future::poll_fn(|cx| {
+            for index in 0..self.tasks.len() {
+                if let Poll::Ready(result) = Pin::new(&mut self.tasks[index]).poll(cx) {
+                    drop(self.tasks.swap_remove(index));
+                    return Poll::Ready(Some(result));
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub fn abort_all(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.abort_all();
+        while self.join_next().await.is_some() {}
+    }
+}
+
+impl<T> Drop for JoinSet<T> {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}

@@ -1,0 +1,85 @@
+name: wasm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Builds and tests this branch merged with upstream main, so an upstream
+  # change that breaks the wasm build shows up before anyone syncs.
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge upstream main
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch https://github.com/vercel-labs/agent-browser main
+          git merge --no-edit FETCH_HEAD
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: wasm/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install test dependencies
+        working-directory: wasm
+        run: pnpm install --frozen-lockfile
+      - name: Check that no std function that traps on WASI is linked
+        working-directory: wasm
+        run: |
+          cargo build --profile guard --target wasm32-wasip1
+          pnpm run check:traps
+      - name: Build the native binary to compare with
+        working-directory: cli
+        run: cargo build
+      - name: Build the module
+        working-directory: wasm
+        run: cargo build --release --target wasm32-wasip1
+      - name: Test in Node.js and workerd, and against the native binary
+        working-directory: wasm
+        env:
+          AGENT_BROWSER_NATIVE: ${{ github.workspace }}/cli/target/debug/agent-browser
+        run: pnpm test
+      - name: Package
+        working-directory: wasm
+        run: pnpm run package --build ${{ github.run_number }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-browser-wasm
+          path: wasm/dist/*.tgz
+
+  release:
+    needs: wasm
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-browser-wasm
+      - name: Publish the tarball as a release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tarball=$(ls coframe-agent-browser-wasm-*.tgz)
+          version=${tarball#coframe-agent-browser-wasm-}
+          version=${version%.tgz}
+          sha256sum "$tarball" > "$tarball.sha256"
+          gh release create "wasm-v$version" "$tarball" "$tarball.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "agent-browser-wasm $version" \
+            --notes "agent-browser built for wasm32-wasip1. Built from $GITHUB_SHA."

@@ -1,0 +1,16 @@
+[package]
+name = "agent-browser-shim-tokio-tungstenite"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The subset of the tokio-tungstenite API that agent-browser uses, over a WebSocket the JS host opens"
+
+[lib]
+name = "tokio_tungstenite"
+
+[dependencies]
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tokio = { package = "agent-browser-shim-tokio", path = "../tokio" }
+futures-util = { version = "0.3", features = ["sink"] }
+futures-channel = "0.3"
+agent-browser-host = { path = "../host" }

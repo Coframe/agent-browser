@@ -8,14 +8,18 @@ export type NavSection = {
   items: NavItem[];
 };
 
+/** Public URL for the introduction page, whose source stays at `index.mdx`. */
+export const docsIntroHref = "/introduction";
+
 export const navigation: NavSection[] = [
   {
     title: null,
     items: [
-      { name: "Introduction", href: "/" },
+      { name: "Introduction", href: docsIntroHref },
       { name: "Installation", href: "/installation" },
       { name: "Quick Start", href: "/quick-start" },
       { name: "Skills", href: "/skills" },
+      { name: "Modern Web Guidance", href: "/modern-web-guidance" },
     ],
   },
   {
@@ -36,6 +40,7 @@ export const navigation: NavSection[] = [
       { name: "Diffing", href: "/diffing" },
       { name: "Network", href: "/network" },
       { name: "CDP Mode", href: "/cdp-mode" },
+      { name: "WebMCP", href: "/webmcp" },
       { name: "Streaming", href: "/streaming" },
       { name: "Video Recording", href: "/recording" },
       { name: "WebGPU", href: "/webgpu" },
@@ -71,6 +76,7 @@ export const navigation: NavSection[] = [
     items: [
       { name: "Chrome", href: "/engines/chrome" },
       { name: "Lightpanda", href: "/engines/lightpanda" },
+      { name: "Obscura", href: "/engines/obscura" },
     ],
   },
   {
@@ -80,5 +86,5 @@ export const navigation: NavSection[] = [
 ];
 
 export const allDocsPages: NavItem[] = navigation.flatMap(
-  (section) => section.items
+  (section) => section.items,
 );
