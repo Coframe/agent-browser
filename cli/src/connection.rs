@@ -572,7 +572,7 @@ impl DaemonOptions<'static> {
     }
 }
 
-fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
+pub(crate) fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     cmd.env("AGENT_BROWSER_DAEMON", "1")
         .env("AGENT_BROWSER_SESSION", session);
 
