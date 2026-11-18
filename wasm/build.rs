@@ -38,7 +38,7 @@ enum Edit {
 /// What the wasm32-wasip1 build changes in upstream sources, and why.
 const EDITS: &[Edit] = &[
     // std traps in these two functions on WASI. The patterns have no
-    // parentheses so they also match a use as a function value.
+    // parentheses, so they also match a use as a function value.
     Edit::Everywhere {
         from: "std::env::temp_dir",
         to: "agent_browser_host::temp_dir",
@@ -54,6 +54,11 @@ const EDITS: &[Edit] = &[
     Edit::Everywhere {
         from: "process::id",
         to: "agent_browser_host::process_id",
+    },
+    // std has no home directory on WASI. The host sets `HOME`.
+    Edit::Everywhere {
+        from: "std::env::home_dir",
+        to: "agent_browser_host::home_dir",
     },
     // The package version is this crate's, not upstream's.
     Edit::Everywhere {

@@ -448,6 +448,13 @@ pub fn temp_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| "/tmp".into())
 }
 
+/// The home directory, from `HOME`. `std::env::home_dir` is `None` on WASI.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(Into::into)
+}
+
 /// The path this module was started as, from `argv[0]`.
 pub fn current_exe() -> std::path::PathBuf {
     std::env::args_os()
