@@ -1,0 +1,58 @@
+# One agent-browser invocation per line, run in order in one session.
+# The same script runs in Node.js, in workerd and through the native binary,
+# and the three outputs must match.
+open {site}/index.html
+snapshot -i
+click @e2
+get text #count
+hover #box
+get text #box
+find role link click --name "Go to form"
+wait --load networkidle
+get title
+snapshot -i
+fill #name "Ada Lovelace"
+type #email "ada@example.com"
+select #plan pro
+check #tos
+fill #notes "hello from wasm"
+find role button click --name "Create account"
+get text #result
+get value #name
+get attr #name placeholder
+is checked #tos
+is visible #result
+get count input
+eval "document.title + ' / ' + location.pathname"
+cookies
+storage local
+console
+errors
+set viewport 390 844
+eval "innerWidth + 'x' + innerHeight"
+set device "iPhone 14"
+eval "navigator.userAgent.includes('iPhone')"
+open {site}/long.html
+scroll down 800
+eval "scrollY"
+scrollintoview #bottom
+get box #bottom
+screenshot --full
+screenshot shot.png
+tab new {site}/form.html
+tab list
+tab t1
+get title
+tab close
+snapshot -c -d 2
+pdf page.pdf
+state save state.json
+get url --json
+wait --text "Row 199"
+wait 100
+bogus-command
+click @e999
+get title --session other
+session list
+close
+close --session other

@@ -440,6 +440,14 @@ pub fn tcp_connect(port: u16) -> std::io::Result<std::net::TcpStream> {
     }
 }
 
+/// Runs first in `main`. wasi-libc starts in `/`, so the working directory
+/// is taken from `PWD`.
+pub fn init() {
+    if let Some(dir) = std::env::var_os("PWD").filter(|dir| !dir.is_empty()) {
+        let _ = std::env::set_current_dir(dir);
+    }
+}
+
 /// The directory for temporary files. `std::env::temp_dir` traps on WASI.
 pub fn temp_dir() -> std::path::PathBuf {
     std::env::var_os("TMPDIR")

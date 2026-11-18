@@ -146,6 +146,12 @@ const EDITS: &[Edit] = &[
         anchor: "            .map(Connection::Tcp)\n            .map_err(|e| format!(\"Failed to connect: {}\", e))\n    }\n",
         text: "    #[cfg(not(any(unix, windows)))]\n    {\n        let port = resolve_port(session)\n            .ok_or_else(|| \"Failed to connect: daemon has not written its port\".to_string())?;\n        agent_browser_host::tcp_connect(port)\n            .map(Connection::Tcp)\n            .map_err(|e| format!(\"Failed to connect: {}\", e))\n    }\n",
     },
+    // Platform setup that an OS does before `main`.
+    Edit::After {
+        file: "main.rs",
+        anchor: "\nfn main() {\n",
+        text: "    agent_browser_host::init();\n",
+    },
     // WASI has no file locks. The host provides one that it releases when
     // the file is closed.
     Edit::Replace {

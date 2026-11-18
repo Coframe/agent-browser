@@ -20,6 +20,7 @@ const OFLAGS = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
 const FDFLAGS_APPEND = 1;
 const EVENT = { TIMER: 1, WEBSOCKET: 2, FETCH: 3, ACCEPT: 4, CONN: 5 };
 const ROOT_FD = 3;
+const SKILLS_DIR = "/usr/share/agent-browser/skill-data";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -35,6 +36,20 @@ export class MemoryFileSystem {
   constructor() {
     /** @type {Map<string, { dir: true } | { dir: false, data: Uint8Array, mtime: number }>} */
     this.nodes = new Map([["/", { dir: true }]]);
+    /** Paths of files written since the last `drainChanges`. */
+    this.changed = new Set();
+  }
+
+  /**
+   * Files the module wrote since the last call, for copying results such
+   * as screenshots into the embedder's own storage. Deleted files are left
+   * out.
+   * @returns {string[]}
+   */
+  drainChanges() {
+    const paths = [...this.changed].filter((path) => this.nodes.get(path)?.dir === false);
+    this.changed.clear();
+    return paths.sort();
   }
 
   static normalize(path) {
@@ -66,6 +81,11 @@ export class MemoryFileSystem {
     this.mkdirp(MemoryFileSystem.parent(path));
     const bytes = typeof data === "string" ? encoder.encode(data) : data;
     this.nodes.set(path, { dir: false, data: bytes, mtime: Date.now() });
+  }
+
+  /** @param {string} path */
+  exists(path) {
+    return this.nodes.has(MemoryFileSystem.normalize(path));
   }
 
   /** @returns {Uint8Array | undefined} */
@@ -115,6 +135,8 @@ function defaultWebSocket(url, headers) {
  * @param {WebAssembly.Module} options.module agent-browser.wasm, compiled.
  * @param {Record<string, string>} [options.env] Environment of every invocation.
  * @param {MemoryFileSystem} [options.fs]
+ * @param {Record<string, string>} [options.skills] The `skills.json` shipped with the module,
+ *   which makes `agent-browser skills` work.
  * @param {(url: string, headers: [string, string][]) => WebSocket | Promise<WebSocket>} [options.webSocket]
  *   Opens the CDP connection. Defaults to `new WebSocket(url)`.
  * @param {typeof fetch} [options.fetch]
@@ -129,11 +151,16 @@ export function createAgentBrowser(options) {
     /**
      * Runs `agent-browser <argv>`.
      * @param {string[]} argv
-     * @param {{ env?: Record<string, string>, stdin?: string }} [run]
+     * @param {{ env?: Record<string, string>, cwd?: string, stdin?: string }} [run]
      * @returns {Promise<{ exitCode: number, stdout: string, stderr: string }>}
      */
     async run(argv, run = {}) {
-      const process = host.start(["agent-browser", ...argv], { ...host.env, ...run.env }, run.stdin);
+      const env = { ...host.env, ...run.env };
+      if (run.cwd) {
+        env.PWD = run.cwd;
+        host.fs.mkdirp(run.cwd);
+      }
+      const process = host.start(["agent-browser", ...argv], env, run.stdin);
       const exitCode = await process.exited;
       return { exitCode, stdout: process.output(1), stderr: process.output(2) };
     },
@@ -152,6 +179,11 @@ export function createAgentBrowser(options) {
   };
 }
 
+/** @param {WebSocket | Promise<WebSocket>} socket A socket, or one still opening. */
+function closeSocket(socket) {
+  Promise.resolve(socket).then((ws) => ws.close(), () => {});
+}
+
 class Host {
   constructor(options) {
     this.module = options.module;
@@ -159,6 +191,13 @@ class Host {
     this.fs = options.fs ?? new MemoryFileSystem();
     this.fs.mkdirp(this.env.HOME);
     this.fs.mkdirp(this.env.TMPDIR);
+    if (options.skills) {
+      for (const [path, text] of Object.entries(options.skills)) {
+        this.fs.writeFile(`${SKILLS_DIR}/${path}`, text);
+      }
+      this.fs.changed.clear();
+      this.env.AGENT_BROWSER_SKILLS_DIR ??= SKILLS_DIR;
+    }
     this.webSocket = options.webSocket ?? defaultWebSocket;
     this.fetch = options.fetch ?? ((...args) => fetch(...args));
     /** @type {Map<number, Process>} */
@@ -233,7 +272,7 @@ class Process {
   release() {
     this.alive = false;
     for (const timer of this.timers.values()) clearTimeout(timer);
-    for (const socket of this.sockets.values()) socket.then?.((ws) => ws.close(), () => {}) ?? socket.close?.();
+    for (const socket of this.sockets.values()) closeSocket(socket);
     for (const controller of this.fetches.values()) controller.abort();
     for (const [port, owner] of this.host.listeners) if (owner === this) this.host.listeners.delete(port);
     for (const [fd, entry] of [...this.fds]) {
@@ -366,8 +405,7 @@ class Process {
       ws_close: (id) => {
         const ws = this.sockets.get(id);
         this.sockets.delete(id);
-        if (ws?.then) ws.then((opened) => opened.close(), () => {});
-        else ws?.close();
+        if (ws) closeSocket(ws);
       },
 
       fetch_start: (id, requestPtr, requestLen, bodyPtr, bodyLen) => {
@@ -639,6 +677,7 @@ class Process {
           }
           node.data.set(data, at);
           node.mtime = Date.now();
+          fs.changed.add(entry.path);
           entry.position = at + size;
         } else return ERRNO.BADF;
         this.view().setUint32(writtenPtr, size, true);
@@ -674,13 +713,17 @@ class Process {
           if (!fs.nodes.get(MemoryFileSystem.parent(path))?.dir) return ERRNO.NOENT;
           node = { dir: false, data: new Uint8Array(0), mtime: Date.now() };
           fs.nodes.set(path, node);
+          fs.changed.add(path);
         }
         if (oflags & OFLAGS.DIRECTORY && !node.dir) return ERRNO.NOTDIR;
-        if (!node.dir && oflags & OFLAGS.TRUNC) node.data = new Uint8Array(0);
+        if (!node.dir && oflags & OFLAGS.TRUNC) {
+          node.data = new Uint8Array(0);
+          fs.changed.add(path);
+        }
         const fd = this.nextFd++;
         this.fds.set(fd, node.dir
           ? { kind: "dir", path }
-          : { kind: "file", node, position: 0, append: Boolean(fdflags & FDFLAGS_APPEND) });
+          : { kind: "file", node, path, position: 0, append: Boolean(fdflags & FDFLAGS_APPEND) });
         this.view().setUint32(fdPtr, fd, true);
         return ERRNO.SUCCESS;
       },
@@ -726,6 +769,7 @@ class Process {
           if (path === from || path.startsWith(from + "/")) {
             fs.nodes.delete(path);
             fs.nodes.set(to + path.slice(from.length), node);
+            if (!node.dir) fs.changed.add(to + path.slice(from.length));
           }
         }
         return ERRNO.SUCCESS;

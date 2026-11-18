@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Home</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:sans-serif;margin:24px} .hidden{display:none} #box{width:120px;height:60px;background:#06c;color:#fff}</style></head>
+<body>
+<h1>Fixture Home</h1>
+<p id="intro">A page for agent-browser tests.</p>
+<nav><a id="next" href="/form.html">Go to form</a> <a href="/long.html">Long page</a></nav>
+<button id="counter" onclick="this.dataset.n=(+this.dataset.n||0)+1;document.getElementById('count').textContent=this.dataset.n">Increment</button>
+<span id="count">0</span>
+<div id="box" onmouseover="this.textContent='hovered'">box</div>
+<script>console.log("fixture loaded"); localStorage.setItem("seed","1"); document.cookie="fixture=yes; path=/";</script>
+</body></html>

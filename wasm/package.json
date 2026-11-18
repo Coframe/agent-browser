@@ -1,0 +1,18 @@
+{
+  "name": "agent-browser-wasm-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.1.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "cargo build --release --target wasm32-wasip1",
+    "check:traps": "node scripts/check-traps.mjs",
+    "package": "node scripts/package.mjs",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260603.0"
+  }
+}
