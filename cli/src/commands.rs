@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
 use crate::color;
-use crate::flags::Flags;
+use crate::flags::{is_global_flag, Flags};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
@@ -61,21 +61,14 @@ impl ParseError {
 }
 
 pub fn gen_id() -> String {
-    format!("r{}", now_micros() % 1000000)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn now_micros() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros()
-}
-
-// SystemTime::now is unsupported and panics on wasm32-unknown-unknown.
-#[cfg(target_arch = "wasm32")]
-fn now_micros() -> u128 {
-    (js_sys::Date::now() * 1000.0) as u128
+    format!(
+        "r{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+            % 1000000
+    )
 }
 
 /// Normalize browser navigation inputs while preserving schemes Chrome can
@@ -182,6 +175,8 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "plugin"
             | "plugins"
             | "chat"
+            | "webmcp"
+            | "flow"
     )
 }
 
@@ -334,24 +329,80 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// Parses `--cdp-headers`: a JSON object of string values sent on the CDP
+/// WebSocket handshake (distinct from page-level `--headers`).
+pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for --cdp-headers at column {}", e.column()))?;
+    let valid = headers
+        .as_object()
+        .is_some_and(|map| map.values().all(Value::is_string));
+    if !valid {
+        return Err("--cdp-headers must be a JSON object with string values".to_string());
+    }
+    Ok(headers)
+}
+
+/// Parses command arguments, including literal fill/type text after `--`.
+/// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+    parse_command_with_batch_scope(args, flags, false)
+}
+
+/// Parses a batch item and rejects global flags that belong on the outer invocation.
+pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    parse_command_with_batch_scope(args, flags, true)
+}
+
+fn parse_command_with_batch_scope(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags, batch_item)?;
 
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
     // wait variants automatically inherit the default without per-variant wiring.
-    if let Some(action) = result.get("action").and_then(|a| a.as_str()) {
-        if action.starts_with("wait") && result.get("timeout").is_none() {
-            if let Some(t) = flags.default_timeout {
-                result["timeout"] = json!(t);
-            }
-        }
-    }
+    inherit_wait_timeout(&mut result, flags.default_timeout);
 
     Ok(result)
 }
 
-fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseError> {
+    if batch_item && is_global_flag(arg) {
+        Err(ParseError::InvalidValue {
+            message: "Pass global flags on the outer batch invocation, not inside a batch item."
+                .to_string(),
+            usage: "[global flags] batch <commands...>",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Stamps `timeout` on a wait-family command, `flow_save` or `flow_run` that
+/// has none, so the client read timeout follows it.
+pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
+    let Some(timeout) = timeout else {
+        return;
+    };
+    let is_wait = cmd
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| {
+            action.starts_with("wait") || action == "flow_save" || action == "flow_run"
+        });
+    if is_wait && cmd.get("timeout").is_none() {
+        cmd["timeout"] = json!(timeout);
+    }
+}
+
+fn parse_command_inner(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -359,6 +410,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         });
     }
 
+    reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
@@ -374,6 +426,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
             // scripts before the first real navigation (see `batch`).
@@ -383,7 +438,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let url = match first_url {
                 Some(u) => *u,
                 None if cmd == "open" => {
-                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                    return Ok(json!({ "id": id, "action": "launch" }));
                 }
                 None => {
                     return Err(ParseError::MissingArguments {
@@ -419,36 +474,23 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "forward" => Ok(json!({ "id": id, "action": "forward" })),
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
         "read" => parse_read(&rest, &id, flags),
+        "webmcp" => parse_webmcp(&rest, &id),
+        "flow" => parse_flow(&rest, &id),
 
         // === Core Actions ===
-        "click" => {
-            let new_tab = rest.contains(&"--new-tab");
-            let sel = rest
-                .iter()
-                .find(|arg| **arg != "--new-tab")
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "click".to_string(),
-                    usage: "click <selector> [--new-tab]",
-                })?;
-            if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
-            } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
-            }
-        }
-        "dblclick" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "dblclick".to_string(),
-                usage: "dblclick <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "dblclick", "selector": sel }))
-        }
+        "click" => parse_click(&rest, &id, "click"),
+        "dblclick" => parse_click(&rest, &id, "dblclick"),
         "fill" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
+            let text = if rest.get(1) == Some(&"--") {
+                &rest[2..]
+            } else {
+                &rest[1..]
+            };
+            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": text.join(" ") }))
         }
         "type" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -464,6 +506,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut i = 1;
             while i < rest.len() {
                 match rest[i] {
+                    "--" => {
+                        text_parts.extend_from_slice(&rest[i + 1..]);
+                        break;
+                    }
                     "--clear" => clear = true,
                     "--delay" => {
                         // Error rather than silently drop a malformed value;
@@ -546,7 +592,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "drag".to_string(),
                 usage: "drag <source> <target>",
             })?;
-            Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
+            let mut cmd = json!({ "id": id, "action": "drag", "source": src, "target": tgt });
+            if rest.contains(&"--human") {
+                cmd["inputMode"] = json!("human");
+            }
+            Ok(cmd)
         }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -700,6 +750,48 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 })?);
                 rest.drain(idx..=idx + 1);
             }
+            let mut element_state: Option<&str> = None;
+            if let Some(idx) = rest.iter().position(|&s| s == "--state") {
+                let raw = rest
+                    .get(idx + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "wait --state".to_string(),
+                        usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                    })?;
+                if !matches!(*raw, "visible" | "hidden" | "attached" | "detached") {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "--state expects visible, hidden, attached, or detached, got '{}'. To load a state file, put --state <path> before wait.",
+                            raw
+                        ),
+                        usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                    });
+                }
+                element_state = Some(*raw);
+                rest.drain(idx..=idx + 1);
+            }
+            let uses_non_selector_wait =
+                rest.iter().any(|arg| {
+                    matches!(
+                        *arg,
+                        "--url"
+                            | "-u"
+                            | "--load"
+                            | "-l"
+                            | "--fn"
+                            | "-f"
+                            | "--text"
+                            | "-t"
+                            | "--download"
+                            | "-d"
+                    )
+                }) || rest.first().is_some_and(|arg| arg.parse::<u64>().is_ok());
+            if element_state.is_some() && uses_non_selector_wait {
+                return Err(ParseError::InvalidValue {
+                    message: "--state can only be used with a selector wait".to_string(),
+                    usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                });
+            }
             let with_timeout = |mut cmd: Value| {
                 if let Some(ms) = timeout_ms {
                     cmd["timeout"] = json!(ms);
@@ -780,9 +872,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 if let Ok(timeout) = arg.parse::<u64>() {
                     Ok(json!({ "id": id, "action": "wait", "timeout": timeout }))
                 } else {
-                    Ok(with_timeout(
-                        json!({ "id": id, "action": "wait", "selector": arg }),
-                    ))
+                    let mut cmd = json!({ "id": id, "action": "wait", "selector": arg });
+                    if let Some(state) = element_state {
+                        cmd["state"] = json!(state);
+                    }
+                    Ok(with_timeout(cmd))
                 }
             } else {
                 Err(ParseError::MissingArguments {
@@ -798,17 +892,44 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
             let mut full_page = false;
-            let positional: Vec<&str> = rest
-                .iter()
-                .filter(|arg| match **arg {
-                    "--full" | "-f" => {
-                        full_page = true;
-                        false
+            let mut if_changed = false;
+            let mut threshold = None;
+            let mut positional = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--full" | "-f" => full_page = true,
+                    "--if-changed" => if_changed = true,
+                    "--threshold" => {
+                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: "screenshot --threshold".to_string(),
+                            usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                        })?;
+                        let value = raw.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!(
+                                "--threshold expects a number from 0 to 1, got '{}'",
+                                raw
+                            ),
+                            usage:
+                                "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                        })?;
+                        if !(0.0..=1.0).contains(&value) {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--threshold must be from 0 to 1, got '{}'", raw),
+                                usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                            });
+                        }
+                        threshold = Some(value);
+                        if_changed = true;
+                        i += 1;
                     }
-                    _ => true,
-                })
-                .copied()
-                .collect();
+                    arg => {
+                        reject_batch_global_flag(batch_item, arg)?;
+                        positional.push(arg);
+                    }
+                }
+                i += 1;
+            }
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
@@ -854,6 +975,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if let Some(ref dir) = flags.screenshot_dir {
                 cmd["screenshotDir"] = json!(dir);
             }
+            if if_changed {
+                cmd["ifChanged"] = json!(true);
+            }
+            if let Some(value) = threshold {
+                cmd["threshold"] = json!(value);
+            }
             Ok(cmd)
         }
         "pdf" => {
@@ -897,7 +1024,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             i += 1;
                         }
                     }
-                    _ => {}
+                    "--delta" => {
+                        obj.insert("delta".to_string(), json!(true));
+                    }
+                    "--full" => {
+                        obj.insert("full".to_string(), json!(true));
+                        obj.insert("delta".to_string(), json!(true));
+                    }
+                    _ => reject_batch_global_flag(batch_item, rest[i])?,
                 }
                 i += 1;
             }
@@ -1053,7 +1187,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
-                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: AUTH_LOGIN_USAGE,
@@ -1064,10 +1198,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut username_selector: Option<String> = None;
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
+                    let mut no_navigate = false;
 
                     let mut j = 2;
                     while j < rest.len() {
                         match rest[j] {
+                            "--no-navigate" => {
+                                if rest
+                                    .get(j + 1)
+                                    .is_some_and(|value| !value.starts_with("--"))
+                                {
+                                    return Err(ParseError::InvalidValue {
+                                        message: "--no-navigate does not accept a value"
+                                            .to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                }
+                                no_navigate = true;
+                            }
                             "--credential-provider" => {
                                 let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
                                 else {
@@ -1165,6 +1313,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     if let Some(ss) = submit_selector {
                         cmd["submitSelector"] = json!(ss);
                     }
+                    if no_navigate {
+                        // Invocation-only behavior. This is intentionally not
+                        // stored in AuthProfile or credential provider data.
+                        cmd["noNavigate"] = json!(true);
+                    }
                     Ok(cmd)
                 }
                 Some("list") => Ok(json!({ "id": id, "action": "auth_list" })),
@@ -1217,7 +1370,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                if let Some(ref raw) = flags.cdp_headers {
+                    cmd["cdpHeaders"] =
+                        parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
+                            message,
+                            usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
+                        })?;
+                }
+                Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -1247,7 +1408,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                if let Some(ref raw) = flags.cdp_headers {
+                    cmd["cdpHeaders"] =
+                        parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
+                            message,
+                            usage: r#"connect <port> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
+                        })?;
+                }
+                Ok(cmd)
             }
         }
 
@@ -1330,6 +1499,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Cookies ===
         "cookies" => {
+            const COOKIES_SET_USAGE: &str = "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--http-only] [--secure] [--same-site <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]";
             let op = rest.first().unwrap_or(&"get");
             match *op {
                 "set" => {
@@ -1382,11 +1552,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
                     let value = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
 
                     let mut cookie = json!({ "name": name, "value": value });
@@ -1428,7 +1598,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            "--httpOnly" => {
+                            "--http-only" | "--httpOnly" => {
                                 cookie["httpOnly"] = json!(true);
                                 i += 1;
                             }
@@ -1436,7 +1606,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cookie["secure"] = json!(true);
                                 i += 1;
                             }
-                            "--sameSite" => {
+                            "--same-site" | "--sameSite" => {
                                 if let Some(same_site) = rest.get(i + 1) {
                                     // Validate sameSite value
                                     if *same_site == "Strict"
@@ -1447,14 +1617,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                         i += 2;
                                     } else {
                                         return Err(ParseError::MissingArguments {
-                                            context: "cookies set --sameSite".to_string(),
-                                            usage: "--sameSite <Strict|Lax|None>",
+                                            context: "cookies set --same-site".to_string(),
+                                            usage: "--same-site <Strict|Lax|None>",
                                         });
                                     }
                                 } else {
                                     return Err(ParseError::MissingArguments {
-                                        context: "cookies set --sameSite".to_string(),
-                                        usage: "--sameSite <Strict|Lax|None>",
+                                        context: "cookies set --same-site".to_string(),
+                                        usage: "--same-site <Strict|Lax|None>",
                                     });
                                 }
                             }
@@ -1476,9 +1646,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            _ => {
-                                // Unknown flag, skip it (or could error)
-                                i += 1;
+                            other => {
+                                let message = if other.starts_with("--") {
+                                    format!("cookies set: unknown flag '{}'", other)
+                                } else {
+                                    "cookies set: unexpected argument".to_string()
+                                };
+                                return Err(ParseError::InvalidValue {
+                                    message,
+                                    usage: COOKIES_SET_USAGE,
+                                });
                             }
                         }
                     }
@@ -1486,7 +1663,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "get" => Ok(json!({ "id": id, "action": "cookies_get" })),
+                _ => Err(ParseError::UnknownSubcommand {
+                    subcommand: op.to_string(),
+                    valid_options: &["get", "set", "clear"],
+                }),
             }
         }
 
@@ -1532,6 +1713,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
+                Some("keep") if rest.len() > 1 => {
+                    let keep = rest[1];
+                    if !matches!(keep, "live" | "throttled" | "frozen") {
+                        return Err(ParseError::UnknownSubcommand {
+                            subcommand: keep.to_string(),
+                            valid_options: &["live", "throttled", "frozen"],
+                        });
+                    }
+                    let mut cmd = json!({ "id": id, "action": "tab_keep", "keep": keep });
+                    if let Some(tab_ref) = rest.get(2) {
+                        cmd["tabId"] = json!(tab_ref);
+                    }
+                    Ok(cmd)
+                }
+                Some("keep") => Err(ParseError::MissingArguments {
+                    context: "tab keep".to_string(),
+                    usage: "tab keep <live|throttled|frozen> [t<N>|label|target]",
+                }),
                 Some(tab_ref) => Ok(json!({
                     "id": id,
                     "action": "tab_switch",
@@ -1664,52 +1863,28 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
-                Some("start") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record start".to_string(),
-                        usage: "record start <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
+                Some("start") => parse_record_take(
+                    &id,
+                    "recording_start",
+                    &rest[1..],
+                    "record start",
+                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
-                Some("restart") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record restart".to_string(),
-                        usage: "record restart <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
+                Some("restart") => parse_record_take(
+                    &id,
+                    "recording_restart",
+                    &rest[1..],
+                    "record restart",
+                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
-                    usage: "record <start|stop|restart> [path] [url]",
+                    usage: "record <start|stop|restart> [path] [url] [--fps <n>]",
                 }),
             }
         }
@@ -1919,8 +2094,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
-            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            let omit_command = rest.contains(&"--omit-command");
+            let commands: Vec<&str> = rest
+                .iter()
+                .filter(|a| **a != "--bail" && **a != "--omit-command")
+                .copied()
+                .collect();
+            let mut cmd =
+                json!({ "id": id, "action": "batch", "bail": bail, "omitCommand": omit_command });
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }
@@ -1932,6 +2113,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Core Web Vitals + hydration ===
         "vitals" | "web-vitals" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             let mut cmd = json!({ "id": id, "action": "vitals" });
             let json_out = rest.contains(&"--json");
             if json_out {
@@ -2022,6 +2206,410 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, run it by sending its requests directly, from the page, or by replaying the recorded commands.
+fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["steps", "save", "run", "list"];
+    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
+
+    fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
+        let mut out = serde_json::Map::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--param" {
+                let pair = args
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "flow --param".to_string(),
+                        usage,
+                    })?;
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: format!("Invalid --param '{}': expected name=value", pair),
+                        usage,
+                    })?;
+                out.insert(k.to_string(), json!(v));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(Value::Object(out))
+    }
+
+    fn flag_value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| *a == flag)
+            .and_then(|i| args.get(i + 1).copied())
+    }
+
+    /// `--timeout <ms>`, which `flow save` and `flow run` both take.
+    fn timeout_flag(
+        args: &[&str],
+        cmd: &mut Value,
+        context: &str,
+        usage: &'static str,
+    ) -> Result<(), ParseError> {
+        if !args.contains(&"--timeout") {
+            return Ok(());
+        }
+        let raw = flag_value(args, "--timeout").ok_or_else(|| ParseError::MissingArguments {
+            context: context.to_string(),
+            usage,
+        })?;
+        let n: u64 = raw.parse().map_err(|_| ParseError::InvalidValue {
+            message: format!("Invalid --timeout '{}': expected a number in ms", raw),
+            usage,
+        })?;
+        cmd["timeout"] = json!(n);
+        Ok(())
+    }
+
+    match rest.first().copied() {
+        Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
+        Some("save") => {
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>] [--timeout <ms>]";
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow save".to_string(),
+                    usage: SAVE_USAGE,
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_save",
+                "name": name,
+                "params": params(&rest[2..], SAVE_USAGE)?,
+            });
+            if let Some(output) = flag_value(rest, "--output") {
+                cmd["output"] = json!(output);
+            }
+            if let Some(from) = flag_value(rest, "--from") {
+                let n: u64 = from.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --from '{}': expected a step number", from),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["from"] = json!(n);
+            }
+            if let Some(to) = flag_value(rest, "--to") {
+                let n: u64 = to.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --to '{}': expected a step number", to),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["to"] = json!(n);
+            }
+            if let Some(description) = flag_value(rest, "--description") {
+                cmd["description"] = json!(description);
+            }
+            timeout_flag(rest, &mut cmd, "flow save --timeout", SAVE_USAGE)?;
+            Ok(cmd)
+        }
+        Some("run") => {
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow run".to_string(),
+                    usage:
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>] [--timeout <ms>]",
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_run",
+                "name": name,
+                "params": params(&rest[2..], "flow run <name> [--param name=value]...")?,
+            });
+            if let Some(pos) = rest.iter().position(|a| *a == "--allow-write") {
+                let usage = "flow run <name> --allow-write <all|id,id,...>";
+                let value = rest
+                    .get(pos + 1)
+                    .filter(|v| !v.starts_with("--"))
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: "--allow-write takes `all` or comma-separated write ids; `flow save` lists them".to_string(),
+                        usage,
+                    })?;
+                cmd["allowWrite"] = json!(value);
+            }
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            let mut filters = serde_json::Map::new();
+            for (i, a) in rest.iter().enumerate() {
+                if *a == "--where" {
+                    let pair = rest
+                        .get(i + 1)
+                        .ok_or_else(|| ParseError::MissingArguments {
+                            context: "flow run --where".to_string(),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    let (k, v) = pair
+                        .split_once('=')
+                        .ok_or_else(|| ParseError::InvalidValue {
+                            message: format!("Invalid --where '{}': expected field=value", pair),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    filters.insert(k.to_string(), json!(v));
+                }
+            }
+            if !filters.is_empty() {
+                cmd["where"] = Value::Object(filters);
+            }
+            if let Some(fields) = flag_value(rest, "--fields") {
+                cmd["fields"] = json!(fields);
+            }
+            if let Some(limit) = flag_value(rest, "--limit") {
+                let n: u64 = limit.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --limit '{}'", limit),
+                    usage: "flow run <name> --limit <n>",
+                })?;
+                cmd["limit"] = json!(n);
+            }
+            timeout_flag(
+                rest,
+                &mut cmd,
+                "flow run --timeout",
+                "flow run <name> --timeout <ms>",
+            )?;
+            Ok(cmd)
+        }
+        Some("list") => {
+            let mut cmd = json!({ "id": id, "action": "flow_list" });
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            Ok(cmd)
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "flow".to_string(),
+            usage: USAGE,
+        }),
+    }
+}
+
+const INVOKE_USAGE: &str =
+    "webmcp invoke <tool> [<json|@file> | --params <json|@file>] [--frame <frame-id>] [--detach] [--timeout <ms>]";
+
+/// Reads the value that follows an invoke flag. A dash-prefixed token is the next
+/// option with its value missing, never the value itself.
+fn invoke_flag_value<'a>(
+    rest: &'a [&'a str],
+    index: usize,
+    flag: &str,
+    usage: &'static str,
+) -> Result<&'a str, ParseError> {
+    match rest.get(index + 1) {
+        Some(value) if !value.starts_with('-') => Ok(value),
+        _ => Err(ParseError::MissingArguments {
+            context: format!("webmcp invoke {}", flag),
+            usage,
+        }),
+    }
+}
+
+/// Reads a tool's input from inline JSON or `@file`, given as `--params` or as the
+/// argument after the tool name. Giving it twice is an error, not a silent override.
+fn set_invoke_params(
+    command: &mut Value,
+    has_params: &mut bool,
+    raw: &str,
+) -> Result<(), ParseError> {
+    if *has_params {
+        return Err(ParseError::InvalidValue {
+            message: "WebMCP params given twice; pass them once, as JSON after the tool name or with --params".to_string(),
+            usage: INVOKE_USAGE,
+        });
+    }
+    let payload = if let Some(path) = raw.strip_prefix('@') {
+        let metadata = std::fs::metadata(path).map_err(|error| ParseError::InvalidValue {
+            message: format!("Unable to read WebMCP params file '{}': {}", path, error),
+            usage: "webmcp invoke <tool> --params @input.json",
+        })?;
+        if metadata.len() as usize > crate::native::webmcp::MAX_INPUT_BYTES {
+            return Err(ParseError::InvalidValue {
+                message: format!(
+                    "WebMCP params file is {} bytes; maximum is {} bytes",
+                    metadata.len(),
+                    crate::native::webmcp::MAX_INPUT_BYTES
+                ),
+                usage: "webmcp invoke <tool> --params @input.json",
+            });
+        }
+        std::fs::read_to_string(path).map_err(|error| ParseError::InvalidValue {
+            message: format!("Unable to read WebMCP params file '{}': {}", path, error),
+            usage: "webmcp invoke <tool> --params @input.json",
+        })?
+    } else {
+        raw.to_string()
+    };
+    let params: Value =
+        serde_json::from_str(&payload).map_err(|error| ParseError::InvalidValue {
+            message: format!("Invalid JSON for WebMCP params: {}", error),
+            usage: "webmcp invoke <tool> --params '{\"key\":\"value\"}'",
+        })?;
+    crate::native::webmcp::validate_input(&params).map_err(|message| ParseError::InvalidValue {
+        message,
+        usage: "webmcp invoke <tool> --params <json|@file>",
+    })?;
+    command["params"] = params;
+    *has_params = true;
+    Ok(())
+}
+
+fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    let subcommand = rest.first().ok_or_else(|| ParseError::MissingArguments {
+        context: "webmcp".to_string(),
+        usage: "webmcp <list|invoke|result|cancel>",
+    })?;
+    match *subcommand {
+        "list" => {
+            let mut command = json!({"id": id, "action": "webmcp_list"});
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--frame" if rest.get(i + 1).is_some_and(|v| !v.starts_with("--")) => {
+                        command["frameId"] = json!(rest[i + 1]);
+                        i += 2;
+                    }
+                    name if !name.starts_with("--") && command.get("tool").is_none() => {
+                        command["tool"] = json!(name);
+                        i += 1;
+                    }
+                    argument => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument for webmcp list: {}", argument),
+                            usage: "webmcp list [tool] [--frame <frame-id>]",
+                        })
+                    }
+                }
+            }
+            Ok(command)
+        }
+        "invoke" => {
+            let tool = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "webmcp invoke".to_string(),
+                usage: INVOKE_USAGE,
+            })?;
+            let mut command = json!({
+                "id": id,
+                "action": "webmcp_invoke",
+                "tool": tool,
+                "params": {},
+            });
+            let mut has_params = false;
+            let mut index = 2;
+            while index < rest.len() {
+                match rest[index] {
+                    "--params" => {
+                        let raw = invoke_flag_value(rest, index, "--params", INVOKE_USAGE)?;
+                        set_invoke_params(&mut command, &mut has_params, raw)?;
+                        index += 1;
+                    }
+                    "--frame" => {
+                        let frame = invoke_flag_value(
+                            rest,
+                            index,
+                            "--frame",
+                            "webmcp invoke <tool> --frame <frame-id>",
+                        )?;
+                        command["frameId"] = json!(frame);
+                        index += 1;
+                    }
+                    "--detach" => command["detach"] = json!(true),
+                    "--timeout" => {
+                        let raw = invoke_flag_value(
+                            rest,
+                            index,
+                            "--timeout",
+                            "webmcp invoke <tool> --timeout <ms>",
+                        )?;
+                        let timeout = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("--timeout expects a number in ms, got '{}'", raw),
+                            usage: "webmcp invoke <tool> --timeout <ms>",
+                        })?;
+                        command["timeout"] = json!(timeout);
+                        index += 1;
+                    }
+                    raw if !raw.starts_with('-') => {
+                        set_invoke_params(&mut command, &mut has_params, raw)?;
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown webmcp invoke option: {}", other),
+                            usage: INVOKE_USAGE,
+                        })
+                    }
+                }
+                index += 1;
+            }
+            Ok(command)
+        }
+        "result" => {
+            let invocation_id = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "webmcp result".to_string(),
+                usage: "webmcp result <invocation-id> [--timeout <ms>]",
+            })?;
+            let mut command = json!({
+                "id": id,
+                "action": "webmcp_result",
+                "invocationId": invocation_id,
+            });
+            let mut index = 2;
+            while index < rest.len() {
+                match rest[index] {
+                    "--timeout" => {
+                        let raw =
+                            rest.get(index + 1)
+                                .ok_or_else(|| ParseError::MissingArguments {
+                                    context: "webmcp result --timeout".to_string(),
+                                    usage: "webmcp result <invocation-id> --timeout <ms>",
+                                })?;
+                        command["timeout"] =
+                            json!(raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                                message: format!("--timeout expects a number in ms, got '{}'", raw),
+                                usage: "webmcp result <invocation-id> --timeout <ms>",
+                            })?);
+                        index += 1;
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown webmcp result option: {}", other),
+                            usage: "webmcp result <invocation-id> [--timeout <ms>]",
+                        });
+                    }
+                }
+                index += 1;
+            }
+            Ok(command)
+        }
+        "cancel" => {
+            let invocation_id = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "webmcp cancel".to_string(),
+                usage: "webmcp cancel <invocation-id>",
+            })?;
+            if let Some(argument) = rest.get(2) {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument for webmcp cancel: {}", argument),
+                    usage: "webmcp cancel <invocation-id>",
+                });
+            }
+            Ok(json!({
+                "id": id,
+                "action": "webmcp_cancel",
+                "invocationId": invocation_id,
+            }))
+        }
+        _ => Err(ParseError::UnknownSubcommand {
+            subcommand: subcommand.to_string(),
+            valid_options: &["list", "invoke", "result", "cancel"],
         }),
     }
 }
@@ -2149,6 +2737,143 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
     }
     if let Some(ref allowed_domains) = flags.allowed_domains {
         cmd["allowedDomains"] = json!(allowed_domains);
+    }
+    Ok(cmd)
+}
+
+/// Parse the arguments shared by `record start` and `record restart`:
+/// `<path> [url] [--fps <n>] [--cursor] [--contact-sheet]` plus an optional
+/// contact-sheet pixel-difference threshold.
+///
+/// `rest` excludes the subcommand. `path` needs an extension so ffmpeg can
+/// pick a container (`.webm` and `.mp4` are the tuned ones). Recording
+/// defaults to
+/// `recording::DEFAULT_FPS`; `--fps` accepts anything up to
+/// `recording::MAX_FPS`, with 60 reserved for motion-heavy takes.
+fn parse_record_take(
+    id: &str,
+    action: &str,
+    rest: &[&str],
+    context: &str,
+    usage: &'static str,
+) -> Result<Value, ParseError> {
+    let max_fps = crate::native::recording::MAX_FPS;
+    let mut path: Option<&str> = None;
+    let mut url: Option<&str> = None;
+    let mut fps: Option<u32> = None;
+    let mut cursor = false;
+    let mut contact_sheet = false;
+    let mut contact_sheet_threshold: Option<f64> = None;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--fps" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} --fps", context),
+                        usage,
+                    })?;
+                let parsed = value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid fps: '{}' is not a valid integer", value),
+                    usage,
+                })?;
+                if parsed == 0 || parsed > max_fps {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "Invalid fps: {} is out of range (valid range: 1-{})",
+                            parsed, max_fps
+                        ),
+                        usage,
+                    });
+                }
+                fps = Some(parsed);
+                i += 2;
+            }
+            "--cursor" => {
+                cursor = true;
+                i += 1;
+            }
+            "--contact-sheet" => {
+                contact_sheet = true;
+                i += 1;
+            }
+            "--contact-sheet-threshold" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} --contact-sheet-threshold", context),
+                        usage,
+                    })?;
+                let parsed = value.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                    message: format!(
+                        "Invalid contact sheet threshold: '{}' is not a number",
+                        value
+                    ),
+                    usage,
+                })?;
+                if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "Invalid contact sheet threshold: {} is out of range (valid range: 0-1)",
+                            parsed
+                        ),
+                        usage,
+                    });
+                }
+                contact_sheet = true;
+                contact_sheet_threshold = Some(parsed);
+                i += 2;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag for {}: {}", context, flag),
+                    usage,
+                });
+            }
+            positional => {
+                if path.is_none() {
+                    path = Some(positional);
+                } else if url.is_none() {
+                    url = Some(positional);
+                } else {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unexpected argument for {}: {}", context, positional),
+                        usage,
+                    });
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let path = path.ok_or_else(|| ParseError::MissingArguments {
+        context: context.to_string(),
+        usage,
+    })?;
+
+    // ffmpeg picks the container from the extension and only fails at
+    // `record stop`, so reject extensionless paths before the daemon is asked.
+    crate::native::recording::validate_output_path(path)
+        .map_err(|message| ParseError::InvalidValue { message, usage })?;
+
+    let mut cmd = json!({ "id": id, "action": action, "path": path });
+    if let Some(u) = url {
+        let url_str = normalize_navigation_url(u);
+        cmd["url"] = json!(url_str);
+    }
+    if let Some(rate) = fps {
+        cmd["fps"] = json!(rate);
+    }
+    if cursor {
+        cmd["cursor"] = json!(true);
+    }
+    if contact_sheet {
+        cmd["contactSheet"] = json!(true);
+    }
+    if let Some(threshold) = contact_sheet_threshold {
+        cmd["contactSheetThreshold"] = json!(threshold);
     }
     Ok(cmd)
 }
@@ -2779,6 +3504,70 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse a click or dblclick command, accepting flags before or after the selector.
+fn parse_click(rest: &[&str], id: &str, action: &'static str) -> Result<Value, ParseError> {
+    let usage = match action {
+        "click" => "click <selector> [--button <left|right|middle|back|forward>] [--modifiers <alt,control,meta,shift>] [--new-tab] [--human]",
+        _ => "dblclick <selector> [--button <left|right|middle|back|forward>] [--modifiers <alt,control,meta,shift>] [--human]",
+    };
+
+    let mut cmd = json!({ "id": id, "action": action });
+    let mut selector: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i];
+        match arg {
+            "--human" => {
+                cmd["inputMode"] = json!("human");
+                i += 1;
+            }
+            "--new-tab" if action == "click" => {
+                cmd["newTab"] = json!(true);
+                i += 1;
+            }
+            "--button" | "--modifiers" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} {}", action, arg),
+                        usage,
+                    })?;
+                if arg == "--button" {
+                    cmd["button"] = json!(value);
+                } else {
+                    let modifiers = crate::native::pointer::Modifiers::parse_list(value)
+                        .map_err(|message| ParseError::InvalidValue { message, usage })?;
+                    cmd["modifiers"] = json!(modifiers.mask());
+                }
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag for {}: {}", action, other),
+                    usage,
+                })
+            }
+            other => {
+                if selector.is_none() {
+                    selector = Some(other);
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let selector = selector.ok_or_else(|| ParseError::MissingArguments {
+        context: action.to_string(),
+        usage,
+    })?;
+    cmd["selector"] = json!(selector);
+
+    crate::native::pointer::ClickPlan::from_command(&cmd, 1)
+        .map_err(|message| ParseError::InvalidValue { message, usage })?;
+    Ok(cmd)
+}
+
+/// Parse mouse arguments, requiring finite coordinates and wheel deltas.
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
 
@@ -2792,19 +3581,34 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "mouse move".to_string(),
                 usage: "mouse move <x> <y>",
             })?;
-            let x = x_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            let y = y_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            Ok(json!({ "id": id, "action": "mousemove", "x": x, "y": y }))
+            let x = parse_finite_f64(x_str, "mouse move x", "mouse move <x> <y>")?;
+            let y = parse_finite_f64(y_str, "mouse move y", "mouse move <x> <y>")?;
+            let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
+            let mut i = 3;
+            while i < rest.len() {
+                match rest[i] {
+                    "--duration" | "--steps" | "--seed" => {
+                        let flag = rest[i];
+                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: format!("mouse move {}", flag),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let value = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("{} expects a non-negative integer, got '{}'", flag, raw),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let key = match flag { "--duration" => "duration", "--steps" => "steps", _ => "seed" };
+                        cmd[key] = json!(value);
+                        i += 2;
+                    }
+                    "--human" => { cmd["inputMode"] = json!("human"); i += 1; }
+                    other => return Err(ParseError::InvalidValue {
+                        message: format!("unexpected argument '{}'", other),
+                        usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>] [--human]",
+                    }),
+                }
+            }
+            Ok(cmd)
         }
         Some("down") => {
             Ok(json!({ "id": id, "action": "mousedown", "button": rest.get(1).unwrap_or(&"left") }))
@@ -2813,11 +3617,15 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "mouseup", "button": rest.get(1).unwrap_or(&"left") }))
         }
         Some("wheel") => {
-            let dy = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let usage = "mouse wheel [deltaY] [deltaX]";
+            let dy = match rest.get(1) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaY", usage)?,
+                None => 100.0,
+            };
+            let dx = match rest.get(2) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaX", usage)?,
+                None => 0.0,
+            };
             Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -2829,6 +3637,17 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             usage: "mouse <move|down|up|wheel> [args...]",
         }),
     }
+}
+
+/// Parse a finite floating-point argument for JSON serialization.
+fn parse_finite_f64(raw: &str, what: &str, usage: &'static str) -> Result<f64, ParseError> {
+    raw.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ParseError::InvalidValue {
+            message: format!("{} expects a finite number, got '{}'", what, raw),
+            usage,
+        })
 }
 
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -2868,12 +3687,11 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 })?;
             let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
             if let Some(scale_str) = rest.get(3) {
-                let scale = scale_str
-                    .parse::<f64>()
-                    .map_err(|_| ParseError::MissingArguments {
-                        context: "set viewport".to_string(),
-                        usage: "set viewport <width> <height> [scale]",
-                    })?;
+                let scale = parse_finite_f64(
+                    scale_str,
+                    "set viewport scale",
+                    "set viewport <width> <height> [scale]",
+                )?;
                 cmd["deviceScaleFactor"] = json!(scale);
             }
             Ok(cmd)
@@ -2894,18 +3712,16 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set geo".to_string(),
                 usage: "set geo <latitude> <longitude>",
             })?;
-            let lat = lat_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
-            let lng = lng_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
+            let lat = parse_finite_f64(
+                lat_str,
+                "set geo latitude",
+                "set geo <latitude> <longitude>",
+            )?;
+            let lng = parse_finite_f64(
+                lng_str,
+                "set geo longitude",
+                "set geo <latitude> <longitude>",
+            )?;
             Ok(json!({ "id": id, "action": "geolocation", "latitude": lat, "longitude": lng }))
         }
         Some("offline") => {
@@ -2975,7 +3791,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
-                usage: "network route <url> [--abort|--body <json>] [--resource-type <csv>]",
+                usage: "network route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]",
             })?;
             let abort = rest.contains(&"--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
@@ -2984,9 +3800,22 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .iter()
                 .position(|&s| s == "--resource-type" || s == "--resource-types");
             let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
+            let allow_origin = rest
+                .iter()
+                .position(|&s| s == "--allow-origin")
+                .and_then(|i| rest.get(i + 1).copied());
+            if allow_origin.is_some() && body.is_none() {
+                return Err(ParseError::MissingArguments {
+                    context: "network route --allow-origin".to_string(),
+                    usage: "network route <url> --body <json> --allow-origin <origin>",
+                });
+            }
             let mut cmd = json!({ "id": id, "action": "route", "url": url, "abort": abort });
             if let Some(body) = body {
                 cmd["response"] = json!({ "body": body });
+                if let Some(origin) = allow_origin {
+                    cmd["response"]["allowOrigin"] = json!(origin);
+                }
             }
             if let Some(rt) = resource_type {
                 cmd["resourceType"] = json!(rt);
@@ -3082,19 +3911,27 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parses storage operations with exact operand counts and one-key read shorthand.
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
 
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
-            let (op, key, value) = match rest.get(1) {
-                Some(&"get") => ("get", rest.get(2), rest.get(3)),
-                Some(&"set") => ("set", rest.get(2), rest.get(3)),
-                Some(&"clear") => ("clear", rest.get(2), rest.get(3)),
-                Some(_) => ("get", rest.get(1), rest.get(2)),
-                None => ("get", None, None),
+            let (op, key, value, max_rest_len) = match rest.get(1) {
+                Some(&"get") => ("get", rest.get(2), None, 3),
+                Some(&"set") => ("set", rest.get(2), rest.get(3), 4),
+                Some(&"clear") => ("clear", None, None, 2),
+                Some(_) => ("get", rest.get(1), None, 2),
+                None => ("get", None, None, 2),
             };
+            if let Some(extra) = rest.get(max_rest_len) {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument: {}", extra),
+                    usage:
+                        "storage <local|session> [get [key] | set <key> <value> | clear | <key>]",
+                });
+            }
             match op {
                 "set" => {
                     let k = key.ok_or_else(|| ParseError::MissingArguments {
@@ -3128,7 +3965,7 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "storage".to_string(),
-            usage: "storage <local|session> [get|set|clear] [key] [value]",
+            usage: "storage <local|session> [get [key] | set <key> <value> | clear | <key>]",
         }),
     }
 }
@@ -3172,6 +4009,7 @@ mod tests {
     fn default_flags() -> Flags {
         Flags {
             session: "test".to_string(),
+            session_source: "--session",
             json: false,
             headed: false,
             debug: false,
@@ -3181,6 +4019,7 @@ mod tests {
             init_scripts: Vec::new(),
             enable: Vec::new(),
             cdp: None,
+            cdp_headers: None,
             profile: None,
             state: None,
             proxy: None,
@@ -3189,12 +4028,18 @@ mod tests {
             user_agent: None,
             provider: None,
             ignore_https_errors: false,
+            ca_cert: None,
+            clear_ca_cert: false,
+            use_system_ca: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,
+            no_webmcp: false,
             no_xvfb: false,
+            no_xvfb_set: false,
             device: None,
             auto_connect: false,
+            pin_tab: false,
             session_name: None,
             restore: None,
             restore_save: None,
@@ -3213,19 +4058,27 @@ mod tests {
             cli_user_agent: false,
             cli_proxy: false,
             cli_proxy_bypass: false,
+            cli_ca_cert: false,
+            cli_use_system_ca: false,
             cli_allow_file_access: false,
             cli_hide_scrollbars: false,
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
             cli_webgpu: false,
+            cli_no_webmcp: false,
+            cli_auto_connect: false,
+            no_auto_connect: false,
             cli_restore: false,
+            cli_pin_tab: false,
+            cli_input_mode: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
             content_boundaries: false,
             max_output: None,
             allowed_domains: None,
+            capture: None,
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
@@ -3236,10 +4089,12 @@ mod tests {
             idle_timeout: None,
             default_timeout: None,
             no_auto_dialog: false,
+            relaunch: false,
             model: None,
             plugins: Vec::new(),
             verbose: false,
             quiet: false,
+            input_mode: "instant".to_string(),
         }
     }
 
@@ -3534,6 +4389,21 @@ mod tests {
     }
 
     #[test]
+    fn test_network_route_allow_origin_needs_body() {
+        let cmd = parse_command(
+            &args("network route https://api.example.com/* --body {} --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["response"]["allowOrigin"], "https://www.example.com");
+        assert!(parse_command(
+            &args("network route https://api.example.com/* --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_cookies_set_with_url() {
         let cmd = parse_command(
             &args("cookies set mycookie myvalue --url https://example.com"),
@@ -3660,6 +4530,40 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_cookies_set_aliases_and_rejects_unknown_arguments() {
+        let kebab = parse_command(
+            &args("cookies set session value --http-only --same-site Strict"),
+            &default_flags(),
+        )
+        .unwrap();
+        let camel = parse_command(
+            &args("cookies set session value --httpOnly --sameSite Strict"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(kebab["cookies"], camel["cookies"]);
+        assert_eq!(kebab["cookies"][0]["httpOnly"], true);
+        assert_eq!(kebab["cookies"][0]["sameSite"], "Strict");
+
+        let unknown_flag = parse_command(
+            &args("cookies set session value --unknown-cookie-flag"),
+            &default_flags(),
+        )
+        .unwrap_err()
+        .format();
+        assert!(unknown_flag.contains("--unknown-cookie-flag"));
+
+        let unexpected = parse_command(
+            &args("cookies set session value private-cookie-value"),
+            &default_flags(),
+        )
+        .unwrap_err()
+        .format();
+        assert!(unexpected.contains("unexpected argument"));
+        assert!(!unexpected.contains("private-cookie-value"));
+    }
+
     // === Storage Tests ===
 
     #[test]
@@ -3684,6 +4588,52 @@ mod tests {
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "local");
         assert_eq!(cmd["key"], "mykey");
+    }
+
+    #[test]
+    fn test_storage_implicit_get_rejects_extra_operands_and_preserves_keys() {
+        for storage_type in ["local", "session"] {
+            for key in ["delete", "remove"] {
+                let bare = parse_command(
+                    &args(&format!("storage {storage_type} {key}")),
+                    &default_flags(),
+                )
+                .unwrap();
+                assert_eq!(bare["action"], "storage_get");
+                assert_eq!(bare["type"], storage_type);
+                assert_eq!(bare["key"], key);
+
+                let err = parse_command(
+                    &args(&format!("storage {storage_type} {key} extra")),
+                    &default_flags(),
+                )
+                .unwrap_err();
+                match err {
+                    ParseError::InvalidValue { message, usage } => {
+                        assert!(message.contains("Unexpected argument: extra"));
+                        assert!(usage.contains("<key>"));
+                    }
+                    other => panic!("expected InvalidValue, got {:?}", other),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_operations_reject_extra_operands() {
+        for (command, extra) in [
+            ("storage local get greeting extra", "extra"),
+            ("storage local set greeting hello world", "world"),
+            ("storage local clear greeting", "greeting"),
+        ] {
+            let error = parse_command(&args(command), &default_flags()).unwrap_err();
+            match error {
+                ParseError::InvalidValue { message, .. } => {
+                    assert_eq!(message, format!("Unexpected argument: {}", extra));
+                }
+                other => panic!("expected InvalidValue, got {:?}", other),
+            }
+        }
     }
 
     #[test]
@@ -3753,16 +4703,19 @@ mod tests {
     fn test_open_without_url_launches() {
         let cmd = parse_command(&args("open"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], true);
+        assert!(cmd.get("headless").is_none());
     }
 
     #[test]
-    fn test_open_without_url_headed() {
+    fn test_open_without_url_leaves_headed_to_settings() {
         let mut flags = default_flags();
         flags.headed = true;
         let cmd = parse_command(&args("open"), &flags).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], false);
+        assert!(
+            cmd.get("headless").is_none(),
+            "headed rides in the settings patch, not the launch command"
+        );
     }
 
     #[test]
@@ -3812,6 +4765,64 @@ mod tests {
         assert_eq!(cmd["raw"], true);
         assert_eq!(cmd["requireMd"], true);
         assert_eq!(cmd["timeout"], 2500);
+    }
+
+    #[test]
+    fn flow_save_takes_a_name_and_a_range() {
+        let cmd = parse_flow(
+            &[
+                "save",
+                "cart",
+                "--from",
+                "3",
+                "--to",
+                "7",
+                "--param",
+                "q=x",
+                "--description",
+                "Adds",
+            ],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["name"], "cart");
+        assert_eq!(cmd["from"], 3);
+        assert_eq!(cmd["to"], 7);
+        assert_eq!(cmd["params"]["q"], "x");
+        assert_eq!(cmd["description"], "Adds");
+        assert!(parse_flow(&["save"], "1").is_err());
+        assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+        let cmd = parse_flow(&["save", "a", "--timeout", "1500"], "1").unwrap();
+        assert_eq!(cmd["timeout"], 1500);
+        assert!(parse_flow(&["save", "a", "--timeout", "soon"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--timeout"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_run_allow_write_takes_all_or_ids() {
+        let cmd = parse_flow(&["run", "cart", "--allow-write", "all"], "1").unwrap();
+        assert_eq!(cmd["allowWrite"], "all");
+        let cmd = parse_flow(
+            &["run", "cart", "--allow-write", "s1r1,s2w1", "--limit", "2"],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["allowWrite"], "s1r1,s2w1");
+        assert!(parse_flow(&["run", "cart"], "1")
+            .unwrap()
+            .get("allowWrite")
+            .is_none());
+        assert!(parse_flow(&["run", "cart", "--allow-write"], "1").is_err());
+        assert!(parse_flow(&["run", "cart", "--allow-write", "--limit", "2"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_start_is_gone_and_steps_parses() {
+        assert!(parse_flow(&["start", "x"], "1").is_err());
+        assert_eq!(parse_flow(&["steps"], "1").unwrap()["action"], "flow_steps");
     }
 
     #[test]
@@ -4041,11 +5052,128 @@ mod tests {
     }
 
     #[test]
+    fn test_click_human() {
+        let cmd = parse_command(&args("click @e1 --human"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_click_accepts_flags_before_and_after_the_selector() {
+        let cmd = parse_command(&args("click --button right #item"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "#item");
+        assert_eq!(cmd["button"], "right");
+
+        let cmd = parse_command(
+            &args("click #item --button middle --modifiers ctrl+shift"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["button"], "middle");
+        assert_eq!(cmd["modifiers"], 10);
+        assert!(cmd.get("clickCount").is_none());
+    }
+
+    #[test]
+    fn test_dblclick_accepts_button_modifiers_and_human() {
+        let cmd = parse_command(
+            &args("dblclick #b --button right --modifiers shift --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "dblclick");
+        assert_eq!(cmd["selector"], "#b");
+        assert_eq!(cmd["button"], "right");
+        assert_eq!(cmd["modifiers"], 8);
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_click_rejects_bad_flags_and_combinations() {
+        for line in [
+            "click #b --button bogus",
+            "click #b --modifiers ctrl,super",
+            "click #b --button",
+            "click #b --bogus",
+            "click #b --new-tab --button right",
+            "dblclick #b --new-tab",
+        ] {
+            assert!(
+                parse_command(&args(line), &default_flags()).is_err(),
+                "{} should be rejected",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_mouse_move_interpolation_options() {
+        let cmd = parse_command(
+            &args("mouse move 600 400 --duration 250 --steps 24 --seed 42 --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["duration"], 250);
+        assert_eq!(cmd["steps"], 24);
+        assert_eq!(cmd["seed"], 42);
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_mouse_move_decimal_coordinates() {
+        let cmd = parse_command(&args("mouse move 10.5 20.25"), &default_flags()).unwrap();
+        assert_eq!(cmd["x"], 10.5);
+        assert_eq!(cmd["y"], 20.25);
+    }
+
+    #[test]
+    fn test_mouse_rejects_invalid_or_nonfinite_values() {
+        for command in [
+            "mouse move nope 1",
+            "mouse move NaN 1",
+            "mouse move 1 nope",
+            "mouse move 1 inf",
+            "mouse wheel nope",
+            "mouse wheel NaN",
+            "mouse wheel 1 nope",
+            "mouse wheel 1 -inf",
+        ] {
+            assert!(matches!(
+                parse_command(&args(command), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["value"], "hello world");
+    }
+
+    #[test]
+    fn test_fill_and_type_preserve_text_after_end_of_options() {
+        let fill_args = args("fill #input -- --config /missing --json café 世界");
+        let fill = parse_command(&crate::flags::clean_args(&fill_args), &default_flags()).unwrap();
+        assert_eq!(fill["value"], "--config /missing --json café 世界");
+
+        let empty_fill = parse_command(&args("fill #input --"), &default_flags()).unwrap();
+        assert_eq!(empty_fill["value"], "");
+
+        let type_args =
+            args("type #input --clear --delay 7 -- --clear --delay 99 café 世界 -- --help");
+        let typed = parse_command(&crate::flags::clean_args(&type_args), &default_flags()).unwrap();
+        assert_eq!(typed["clear"], true);
+        assert_eq!(typed["delay"], 7);
+        assert_eq!(typed["text"], "--clear --delay 99 café 世界 -- --help");
+
+        let empty_type =
+            parse_command(&args("type #input --clear --delay 7 --"), &default_flags()).unwrap();
+        assert_eq!(empty_type["clear"], true);
+        assert_eq!(empty_type["delay"], 7);
+        assert_eq!(empty_type["text"], "");
     }
 
     #[test]
@@ -4229,6 +5357,27 @@ mod tests {
         assert_eq!(cmd["tabId"], "select");
     }
 
+    #[test]
+    fn test_tab_keep_modes() {
+        let cmd = parse_command(&args("tab keep live"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_keep");
+        assert_eq!(cmd["keep"], "live");
+        assert!(cmd.get("tabId").is_none());
+
+        let cmd = parse_command(&args("tab keep frozen t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["keep"], "frozen");
+        assert_eq!(cmd["tabId"], "t2");
+
+        assert!(matches!(
+            parse_command(&args("tab keep"), &default_flags()),
+            Err(ParseError::MissingArguments { .. })
+        ));
+        assert!(matches!(
+            parse_command(&args("tab keep warm"), &default_flags()),
+            Err(ParseError::UnknownSubcommand { .. })
+        ));
+    }
+
     // === Network ===
 
     #[test]
@@ -4397,12 +5546,51 @@ mod tests {
         assert_eq!(cmd["path"], "./button.png");
     }
 
+    #[test]
+    fn test_screenshot_if_changed() {
+        let cmd = parse_command(&args("screenshot --if-changed"), &default_flags()).unwrap();
+        assert_eq!(cmd["ifChanged"], true);
+        assert!(cmd.get("threshold").is_none());
+    }
+
+    #[test]
+    fn test_screenshot_threshold_implies_if_changed() {
+        let cmd = parse_command(
+            &args("screenshot .btn ./button.png --threshold 0.025"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], ".btn");
+        assert_eq!(cmd["path"], "./button.png");
+        assert_eq!(cmd["ifChanged"], true);
+        assert_eq!(cmd["threshold"], 0.025);
+    }
+
+    #[test]
+    fn test_screenshot_threshold_rejects_out_of_range_value() {
+        let result = parse_command(&args("screenshot --threshold 1.1"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_screenshot_threshold_requires_value() {
+        let result = parse_command(&args("screenshot --threshold"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
     // === Snapshot ===
 
     #[test]
     fn test_snapshot() {
         let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_delta_and_full_flags() {
+        let cmd = parse_command(&args("snapshot --delta --full"), &default_flags()).unwrap();
+        assert_eq!(cmd["delta"], true);
+        assert_eq!(cmd["full"], true);
     }
 
     #[test]
@@ -4463,6 +5651,61 @@ mod tests {
         let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["selector"], "#element");
+    }
+
+    #[test]
+    fn test_wait_selector_state_in_either_order() {
+        for (command, state) in [
+            ("wait #spinner --state visible", "visible"),
+            ("wait --state hidden #spinner", "hidden"),
+            ("wait #spinner --state attached", "attached"),
+            ("wait --state detached #spinner", "detached"),
+        ] {
+            let cmd = parse_command(&args(command), &default_flags()).unwrap();
+            assert_eq!(cmd["selector"], "#spinner");
+            assert_eq!(cmd["state"], state);
+        }
+    }
+
+    #[test]
+    fn test_wait_selector_state_with_timeout() {
+        let cmd = parse_command(
+            &args("wait --state hidden #spinner --timeout 9000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["state"], "hidden");
+        assert_eq!(cmd["timeout"], 9000);
+    }
+
+    #[test]
+    fn test_wait_selector_state_rejects_unknown_value() {
+        for state in ["gone", "/tmp/auth.json"] {
+            let error = parse_command(
+                &args(&format!("wait #spinner --state {state}")),
+                &default_flags(),
+            )
+            .unwrap_err();
+            assert!(matches!(error, ParseError::InvalidValue { .. }));
+            assert!(error.format().contains("put --state <path> before wait"));
+        }
+    }
+
+    #[test]
+    fn test_wait_selector_state_rejects_non_selector_waits() {
+        for command in [
+            "wait --url **/dashboard --state hidden",
+            "wait --load networkidle --state hidden",
+            "wait --fn true --state hidden",
+            "wait --text Ready --state hidden",
+            "wait --download --state hidden",
+            "wait 1000 --state hidden",
+        ] {
+            assert!(matches!(
+                parse_command(&args(command), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
     }
 
     #[test]
@@ -4591,6 +5834,219 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert!(cmd.get("url").is_none());
+        // Omitting --fps lets the daemon apply its 30 fps default.
+        assert!(cmd.get("fps").is_none());
+    }
+
+    #[test]
+    fn test_record_start_with_fps() {
+        let cmd =
+            parse_command(&args("record start output.webm --fps 60"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["path"], "output.webm");
+        assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_with_cursor() {
+        let cmd =
+            parse_command(&args("record start output.webm --cursor"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["cursor"], true);
+    }
+
+    #[test]
+    fn test_record_start_with_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet --contact-sheet-threshold 0.12"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.12);
+    }
+
+    #[test]
+    fn test_record_start_threshold_implies_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet-threshold 0.01"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.01);
+    }
+
+    #[test]
+    fn test_record_start_rejects_invalid_contact_sheet_threshold() {
+        for value in ["-0.1", "1.1", "many"] {
+            let result = parse_command(
+                &args(&format!(
+                    "record start output.webm --contact-sheet-threshold {}",
+                    value
+                )),
+                &default_flags(),
+            );
+            assert!(result.is_err(), "threshold {value} should fail");
+        }
+    }
+
+    #[test]
+    fn test_record_start_with_url_and_fps() {
+        let cmd = parse_command(
+            &args("record start demo.webm example.com --fps 24"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["fps"], 24);
+    }
+
+    #[test]
+    fn test_record_start_with_fps_before_url() {
+        let cmd = parse_command(
+            &args("record start demo.webm --fps 60 https://example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_rejects_fps_above_max() {
+        let result = parse_command(&args("record start demo.webm --fps 120"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_zero_fps() {
+        let result = parse_command(&args("record start demo.webm --fps 0"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_accepts_any_extension() {
+        // .webm and .mp4 are the documented formats; other containers
+        // worked before validation existed and are still passed through.
+        for path in [
+            "demo.mp4",
+            "./out/DEMO.WEBM",
+            "Take.Mp4",
+            "take.mkv",
+            "take.mov",
+            "dir.v2/take.MP4",
+        ] {
+            let cmd = parse_command(&args(&format!("record start {}", path)), &default_flags())
+                .unwrap_or_else(|e| panic!("{} should parse: {:?}", path, e));
+            assert_eq!(cmd["action"], "recording_start");
+            assert_eq!(cmd["path"], path);
+        }
+    }
+
+    #[test]
+    fn test_record_start_rejects_extensionless_path() {
+        for path in ["take", "dir.v2/take", ".hidden"] {
+            let err = parse_command(&args(&format!("record start {}", path)), &default_flags())
+                .unwrap_err();
+            match err {
+                ParseError::InvalidValue { message, usage } => {
+                    assert!(message.contains(path), "should name the path: {}", message);
+                    assert!(message.contains("no extension"), "message was: {}", message);
+                    assert!(
+                        message.contains(".webm"),
+                        "should suggest .webm: {}",
+                        message
+                    );
+                    assert!(message.contains(".mp4"), "should suggest .mp4: {}", message);
+                    assert!(usage.starts_with("record start"), "usage was: {}", usage);
+                }
+                other => panic!("expected InvalidValue for {}, got {:?}", path, other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_record_start_rejects_extensionless_path_with_valid_fps() {
+        // The path is validated once all flags are parsed, so a bad path
+        // is reported even when --fps is fine.
+        let err = parse_command(&args("record start take --fps 60"), &default_flags()).unwrap_err();
+        assert!(
+            matches!(err, ParseError::InvalidValue { ref message, .. } if message.contains("output path"))
+        );
+    }
+
+    #[test]
+    fn test_record_restart_rejects_extensionless_path() {
+        let err = parse_command(&args("record restart take2"), &default_flags()).unwrap_err();
+        match err {
+            ParseError::InvalidValue { message, usage } => {
+                assert!(message.contains("take2"), "message was: {}", message);
+                assert!(usage.starts_with("record restart"), "usage was: {}", usage);
+            }
+            other => panic!("expected InvalidValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_record_start_rejects_non_numeric_fps() {
+        let result = parse_command(&args("record start demo.webm --fps fast"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_fps_without_value() {
+        let result = parse_command(&args("record start demo.webm --fps"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_unknown_flag() {
+        let result = parse_command(&args("record start demo.webm --smooth"), &default_flags());
+        match result.unwrap_err() {
+            ParseError::InvalidValue { message, .. } => {
+                assert!(message.contains("--smooth"), "got: {message}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_rejects_extra_positional() {
+        let result = parse_command(
+            &args("record start demo.webm example.com extra"),
+            &default_flags(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_restart_with_fps() {
+        let cmd = parse_command(
+            &args("record restart take2.webm --fps 60"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "recording_restart");
+        assert_eq!(cmd["path"], "take2.webm");
+        assert_eq!(cmd["fps"], 60);
     }
 
     #[test]
@@ -4866,10 +6322,21 @@ mod tests {
 
     #[test]
     fn test_mouse_wheel() {
-        let cmd = parse_command(&args("mouse wheel 100 50"), &default_flags()).unwrap();
+        let cmd = parse_command(&args("mouse wheel 100.5 50.25"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wheel");
-        assert_eq!(cmd["deltaY"], 100);
-        assert_eq!(cmd["deltaX"], 50);
+        assert_eq!(cmd["deltaY"], 100.5);
+        assert_eq!(cmd["deltaX"], 50.25);
+    }
+
+    #[test]
+    fn test_mouse_wheel_defaults_and_zero() {
+        let defaults = parse_command(&args("mouse wheel"), &default_flags()).unwrap();
+        assert_eq!(defaults["deltaY"], 100.0);
+        assert_eq!(defaults["deltaX"], 0.0);
+
+        let zero = parse_command(&args("mouse wheel 0 0"), &default_flags()).unwrap();
+        assert_eq!(zero["deltaY"], 0.0);
+        assert_eq!(zero["deltaX"], 0.0);
     }
 
     #[test]
@@ -4925,6 +6392,25 @@ mod tests {
     fn test_set_viewport_invalid_scale() {
         let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_rejects_non_finite_float_arguments() {
+        for command in [
+            "set viewport 800 600 nan",
+            "set viewport 800 600 inf",
+            "set geo nan 10",
+            "set geo 10 inf",
+        ] {
+            let error = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                error.contains("finite number"),
+                "command should reject non-finite value: {}",
+                command
+            );
+        }
     }
 
     #[test]
@@ -5056,6 +6542,26 @@ mod tests {
     }
 
     #[test]
+    fn test_flow_save_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow save stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow save stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_flow_run_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(40000);
+        let cmd = parse_command(&args("flow run stoves"), &flags).unwrap();
+        assert_eq!(cmd["action"], "flow_run");
+        assert_eq!(cmd["timeout"], 40000);
+        let none = parse_command(&args("flow run stoves"), &default_flags()).unwrap();
+        assert!(none.get("timeout").is_none());
+    }
+
+    #[test]
     fn test_wait_selector_inherits_default_timeout() {
         let flags = flags_with_default_timeout(3000);
         let cmd = parse_command(&args("wait #element"), &flags).unwrap();
@@ -5126,6 +6632,45 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
+    }
+
+    #[test]
+    fn test_connect_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(&args("connect wss://example.com/cdp"), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpUrl"], "wss://example.com/cdp");
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_connect_port_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(&args("connect 9222"), &flags).unwrap();
+        assert_eq!(cmd["cdpPort"], 9222);
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_rejects_invalid_shapes() {
+        assert!(parse_cdp_headers(r#"{"Authorization":"Bearer t"}"#).is_ok());
+        assert!(parse_cdp_headers("{bad").is_err());
+        assert!(parse_cdp_headers(r#"["x"]"#).is_err());
+        assert!(parse_cdp_headers(r#"{"Authorization":123}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_errors_never_echo_values() {
+        for raw in [
+            r#"{"Authorization":"Bearer SECRET",}"#,
+            r#"{"Authorization":"Bearer SECRET","n":1}"#,
+            r#"["Bearer SECRET"]"#,
+        ] {
+            let err = parse_cdp_headers(raw).unwrap_err();
+            assert!(!err.contains("SECRET"), "{err}");
+        }
     }
 
     #[test]
@@ -5236,6 +6781,180 @@ mod tests {
     fn test_stream_status() {
         let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "stream_status");
+    }
+
+    #[test]
+    fn test_webmcp_commands() {
+        let list = parse_command(&args("webmcp list"), &default_flags()).unwrap();
+        assert_eq!(list["action"], "webmcp_list");
+
+        let invoke = parse_command(
+            &args(r#"webmcp invoke search --params {"query":"agents"} --frame frame-1 --detach --timeout 5000"#),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(invoke["action"], "webmcp_invoke");
+        assert_eq!(invoke["tool"], "search");
+        assert_eq!(invoke["params"]["query"], "agents");
+        assert_eq!(invoke["frameId"], "frame-1");
+        assert_eq!(invoke["detach"], true);
+        assert_eq!(invoke["timeout"], 5000);
+
+        let result = parse_command(
+            &args("webmcp result invocation-1 --timeout 200"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(result["action"], "webmcp_result");
+        assert_eq!(result["timeout"], 200);
+
+        let cancel = parse_command(&args("webmcp cancel invocation-1"), &default_flags()).unwrap();
+        assert_eq!(cancel["action"], "webmcp_cancel");
+    }
+
+    #[test]
+    fn test_webmcp_invoke_takes_params_after_tool_name() {
+        let positional = parse_command(
+            &args(r#"webmcp invoke search {"query":"agents"} --frame frame-1"#),
+            &default_flags(),
+        )
+        .unwrap();
+        let flagged = parse_command(
+            &args(r#"webmcp invoke search --params {"query":"agents"} --frame frame-1"#),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(positional["params"]["query"], "agents");
+        assert_eq!(positional["frameId"], "frame-1");
+        assert_eq!(positional["params"], flagged["params"]);
+        assert_eq!(positional["frameId"], flagged["frameId"]);
+    }
+
+    #[test]
+    fn test_webmcp_invoke_rejects_params_given_twice() {
+        for input in [
+            r#"webmcp invoke search {"a":1} --params {"b":2}"#,
+            r#"webmcp invoke search --params {"a":1} {"b":2}"#,
+            r#"webmcp invoke search {"a":1} {"b":2}"#,
+            r#"webmcp invoke search --params {"a":1} --params {"b":2}"#,
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains("given twice"), "{input} gave: {message}");
+        }
+    }
+
+    #[test]
+    fn test_webmcp_invoke_rejects_malformed_positional_params() {
+        let err =
+            parse_command(&args("webmcp invoke search not-json"), &default_flags()).unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
+        );
+    }
+
+    #[test]
+    fn test_webmcp_invoke_reports_single_dash_arguments_as_unknown_options() {
+        for input in [
+            "webmcp invoke search -frame f1",
+            r#"webmcp invoke search {"a":1} -d"#,
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Unknown webmcp invoke option"),
+                "{input} gave: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_webmcp_invoke_does_not_read_a_flag_as_a_value() {
+        for input in [
+            r#"webmcp invoke search --params --frame frame-1"#,
+            "webmcp invoke search --frame --detach",
+            "webmcp invoke search --timeout --detach",
+        ] {
+            let err = parse_command(&args(input), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(
+                message.contains("Missing arguments for: webmcp invoke --"),
+                "{input} gave: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_webmcp_rejects_malformed_params() {
+        let err = parse_command(
+            &args("webmcp invoke search --params not-json"),
+            &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("Invalid JSON for WebMCP params"),
+            "gave: {message}"
+        );
+    }
+
+    #[test]
+    fn test_webmcp_reads_params_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        std::fs::write(&path, r#"{"from":"EZE","to":"LIM"}"#).unwrap();
+        let command = parse_command(
+            &[
+                "webmcp".to_string(),
+                "invoke".to_string(),
+                "search_flights".to_string(),
+                "--params".to_string(),
+                format!("@{}", path.display()),
+            ],
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(command["params"]["from"], "EZE");
+        assert_eq!(command["params"]["to"], "LIM");
+    }
+
+    #[test]
+    fn test_webmcp_rejects_non_object_params() {
+        let err = parse_command(
+            &args(r#"webmcp invoke search --params ["agents"]"#),
+            &default_flags(),
+        )
+        .unwrap_err();
+        let message = err.format();
+        assert!(
+            message.contains("WebMCP params must be a JSON object"),
+            "gave: {message}"
+        );
+    }
+
+    #[test]
+    fn test_webmcp_rejects_unexpected_arguments() {
+        for (command, expected) in [
+            (
+                "webmcp list search extra",
+                "Unexpected argument for webmcp list",
+            ),
+            ("webmcp list --frame", "Unexpected argument for webmcp list"),
+            (
+                "webmcp result invocation-1 extra",
+                "Unknown webmcp result option",
+            ),
+            (
+                "webmcp cancel invocation-1 extra",
+                "Unexpected argument for webmcp cancel",
+            ),
+        ] {
+            let err = parse_command(&args(command), &default_flags()).unwrap_err();
+            let message = err.format();
+            assert!(message.contains(expected), "{command} gave: {message}");
+        }
     }
 
     #[test]
@@ -5866,6 +7585,61 @@ mod tests {
         assert_eq!(cmd["usernameSelector"], "#login_field");
         assert_eq!(cmd["passwordSelector"], "#password");
         assert_eq!(cmd["submitSelector"], "input[type=submit]");
+        assert!(cmd.get("noNavigate").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate() {
+        let cmd =
+            parse_command(&args("auth login github --no-navigate"), &default_flags()).unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert!(cmd.get("url").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_with_url() {
+        let cmd = parse_command(
+            &args("auth login github --no-navigate --url https://github.com/login"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["url"], "https://github.com/login");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_combines_with_provider_and_selectors() {
+        let cmd = parse_command(
+            &args(
+                "auth login work --credential-provider vault --item Work --no-navigate --username-selector #email --password-selector #pass --submit-selector #submit",
+            ),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["credentialProvider"], "vault");
+        assert_eq!(cmd["credentialItem"], "Work");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["usernameSelector"], "#email");
+        assert_eq!(cmd["passwordSelector"], "#pass");
+        assert_eq!(cmd["submitSelector"], "#submit");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_rejects_value() {
+        let err = parse_command(
+            &args("auth login github --no-navigate true"),
+            &default_flags(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 
     #[test]
@@ -5888,5 +7662,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_batch_items_reject_global_flags_and_keep_literal_text() {
+        for item in [
+            "--session other open https://example.com",
+            "goto --init-script probe.js",
+            "screenshot --init-script probe.js",
+            "snapshot --init-script probe.js",
+            "vitals --init-script probe.js",
+        ] {
+            let err = parse_batch_command(&args(item), &default_flags()).unwrap_err();
+            assert!(
+                matches!(&err, ParseError::InvalidValue { message, .. } if message.contains("outer batch invocation")),
+                "{item}: {err:?}"
+            );
+        }
+        for item in [
+            "fill #field --json",
+            "type #field --clear",
+            "vitals https://example.com",
+        ] {
+            assert!(
+                parse_batch_command(&args(item), &default_flags()).is_ok(),
+                "{item}"
+            );
+        }
     }
 }

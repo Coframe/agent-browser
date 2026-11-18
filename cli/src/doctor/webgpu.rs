@@ -197,6 +197,7 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         extensions: &[],
         init_scripts: &[],
         enable: &[],
+        pin_tab: false,
         args: None,
         user_agent: None,
         proxy: None,
@@ -228,6 +229,7 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         idle_timeout: None,
         default_timeout: None,
         cdp: None,
+        cdp_headers: None,
         no_auto_dialog: false,
         plugins: None,
     };

@@ -11,18 +11,23 @@ pub mod cdp;
 #[allow(dead_code)]
 pub mod cookies;
 #[allow(dead_code)]
-#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon;
 #[allow(dead_code)]
 pub mod diff;
 #[allow(dead_code)]
+pub mod downloads;
+#[allow(dead_code)]
 pub mod element;
+#[allow(dead_code)]
+pub mod flow;
 #[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]
 pub mod interaction;
 #[allow(dead_code)]
 pub mod network;
+#[allow(dead_code)]
+pub mod pointer;
 #[allow(dead_code)]
 pub mod policy;
 #[allow(dead_code)]
@@ -42,9 +47,13 @@ pub mod storage;
 #[allow(dead_code)]
 pub mod stream;
 #[allow(dead_code)]
+pub mod tab_binding;
+#[allow(dead_code)]
 pub mod tracing;
 #[allow(dead_code)]
 pub mod webdriver;
+#[allow(dead_code)]
+pub mod webmcp;
 
 #[cfg(test)]
 mod e2e_tests;

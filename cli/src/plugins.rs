@@ -6,13 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
-#[cfg(not(target_arch = "wasm32"))]
 use std::process::Stdio;
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::AsyncWriteExt;
 
 pub const PROTOCOL_VERSION: &str = "agent-browser.plugin.v1";
@@ -115,7 +111,6 @@ struct LaunchMutationPluginResponse {
     data: Option<LaunchMutation>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 struct PluginManifest {
@@ -124,7 +119,6 @@ struct PluginManifest {
     description: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginManifestResponse {
@@ -204,20 +198,6 @@ async fn invoke_plugin(
     invoke_plugin_process(plugin, payload, timeout_secs, expose_plugin_error).await
 }
 
-#[cfg(target_arch = "wasm32")]
-async fn invoke_plugin_process(
-    plugin: &PluginConfig,
-    _payload: serde_json::Value,
-    _timeout_secs: u64,
-    _expose_plugin_error: bool,
-) -> Result<serde_json::Value, String> {
-    Err(format!(
-        "Plugin '{}' cannot run: plugin processes are not supported on this platform",
-        plugin.name
-    ))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 async fn invoke_plugin_process(
     plugin: &PluginConfig,
     payload: serde_json::Value,
@@ -265,6 +245,12 @@ async fn invoke_plugin_process(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if protocol != PROTOCOL_VERSION {
+        if !expose_plugin_error {
+            return Err(format!(
+                "Plugin '{}' used unsupported protocol",
+                plugin.name
+            ));
+        }
         return Err(format!(
             "Plugin '{}' used unsupported protocol '{}'",
             plugin.name, protocol
@@ -446,14 +432,12 @@ pub async fn launch_mutations_from_plugins(
     Ok(mutations)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PluginSourceKind {
     Npm,
     Github,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PluginSource {
     kind: PluginSourceKind,
@@ -462,14 +446,12 @@ struct PluginSource {
     source: String,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PluginConfigScope {
     Project,
     Global,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct PluginAddOptions {
     reference: String,
     name: Option<String>,
@@ -478,7 +460,6 @@ struct PluginAddOptions {
     no_manifest: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_plugin_source(reference: &str) -> Result<PluginSource, String> {
     let trimmed = reference.trim();
     if trimmed.is_empty() {
@@ -517,12 +498,11 @@ fn parse_plugin_source(reference: &str) -> Result<PluginSource, String> {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_plugin_add_args(args: &[String]) -> Result<PluginAddOptions, String> {
     let mut reference = None;
     let mut name = None;
     let mut capabilities = Vec::new();
-    let mut scope = PluginConfigScope::Project;
+    let mut scope = PluginConfigScope::Global;
     let mut no_manifest = false;
     let mut i = 2;
 
@@ -580,7 +560,6 @@ fn parse_plugin_add_args(args: &[String]) -> Result<PluginAddOptions, String> {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn discover_plugin_manifest(plugin: &PluginConfig) -> Result<PluginManifest, String> {
     let payload = json!({
         "protocol": PROTOCOL_VERSION,
@@ -607,7 +586,6 @@ async fn discover_plugin_manifest(plugin: &PluginConfig) -> Result<PluginManifes
         .ok_or_else(|| format!("Plugin '{}' returned no manifest", plugin.name))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn derive_plugin_name(source: &PluginSource) -> String {
     let raw = match source.kind {
         PluginSourceKind::Npm => package_name_without_version(&source.reference),
@@ -624,7 +602,6 @@ fn derive_plugin_name(source: &PluginSource) -> String {
         .to_string()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn package_name_without_version(reference: &str) -> String {
     if reference.starts_with('@') {
         let mut parts = reference.splitn(2, '/');
@@ -639,7 +616,6 @@ fn package_name_without_version(reference: &str) -> String {
     reference.split('@').next().unwrap_or(reference).to_string()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn validate_plugin_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("plugin name cannot be empty".to_string());
@@ -650,17 +626,15 @@ fn validate_plugin_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn config_path_for_scope(scope: &PluginConfigScope) -> Result<PathBuf, String> {
     match scope {
         PluginConfigScope::Project => Ok(PathBuf::from("agent-browser.json")),
-        PluginConfigScope::Global => dirs::home_dir()
+        PluginConfigScope::Global => std::env::home_dir()
             .map(|d| d.join(".agent-browser").join("config.json"))
             .ok_or_else(|| "Could not determine home directory".to_string()),
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn read_config_json(path: &Path) -> Result<serde_json::Value, String> {
     if !path.exists() {
         return Ok(json!({}));
@@ -675,7 +649,6 @@ fn read_config_json(path: &Path) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn write_config_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|e| {
@@ -692,7 +665,6 @@ fn write_config_json(path: &Path, value: &serde_json::Value) -> Result<(), Strin
         .map_err(|e| format!("Failed to write config {}: {}", path.display(), e))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn upsert_plugin_config(path: &Path, plugin: &PluginConfig) -> Result<(), String> {
     let mut value = read_config_json(path)?;
     let obj = value
@@ -718,7 +690,6 @@ fn upsert_plugin_config(path: &Path, plugin: &PluginConfig) -> Result<(), String
     write_config_json(path, &value)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn build_plugin_config_from_add(
     source: &PluginSource,
     options: &PluginAddOptions,
@@ -753,7 +724,6 @@ fn build_plugin_config_from_add(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn print_plugin_added(plugin: &PluginConfig, path: &Path, json_output: bool) {
     if json_output {
         println!(
@@ -776,7 +746,6 @@ fn print_plugin_added(plugin: &PluginConfig, path: &Path, json_output: bool) {
     println!("Capabilities: {}", plugin.capabilities.join(", "));
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn add_plugin_command(args: &[String], json_output: bool) -> Result<(), String> {
     let options = parse_plugin_add_args(args)?;
     let source = parse_plugin_source(&options.reference)?;
@@ -814,7 +783,6 @@ fn add_plugin_command(args: &[String], json_output: bool) -> Result<(), String> 
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn run_plugin_command(args: &[String], plugins: &[PluginConfig], json_output: bool) {
     let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
     match sub {
@@ -905,7 +873,6 @@ pub fn run_plugin_command(args: &[String], plugins: &[PluginConfig], json_output
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_run_payload(args: &[String]) -> Result<serde_json::Value, String> {
     let mut payload = json!({});
     let mut i = 4;
@@ -928,7 +895,6 @@ fn parse_run_payload(args: &[String]) -> Result<serde_json::Value, String> {
     Ok(payload)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn is_core_plugin_entrypoint(entrypoint: &str) -> bool {
     matches!(
         entrypoint,
@@ -942,7 +908,6 @@ fn is_core_plugin_entrypoint(entrypoint: &str) -> bool {
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn print_plugin_list(plugins: &[PluginConfig], json_output: bool) {
     if json_output {
         println!("{}", json!({ "plugins": plugins }));
@@ -962,7 +927,6 @@ fn print_plugin_list(plugins: &[PluginConfig], json_output: bool) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn print_plugin(plugin: &PluginConfig, json_output: bool) {
     if json_output {
         println!("{}", json!({ "plugin": plugin }));
@@ -980,7 +944,6 @@ fn print_plugin(plugin: &PluginConfig, json_output: bool) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn print_plugin_error(message: &str, json_output: bool) {
     if json_output {
         println!("{}", json!({ "success": false, "error": message }));
@@ -1263,6 +1226,44 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
 
         assert!(err.contains("success=false"));
         assert!(!err.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_protocol_error_obeys_redaction_setting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("fixture-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"fixture-invalid-v0","success":false,"error":"fixture diagnostic"}'
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let plugin = PluginConfig {
+            name: "fixture".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            ..PluginConfig::default()
+        };
+        let redacted = invoke_plugin_process(&plugin, json!({}), 5, false)
+            .await
+            .unwrap_err();
+        let detailed = invoke_plugin_process(&plugin, json!({}), 5, true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(redacted, "Plugin 'fixture' used unsupported protocol");
+        assert_eq!(
+            detailed,
+            "Plugin 'fixture' used unsupported protocol 'fixture-invalid-v0'"
+        );
     }
 
     #[cfg(unix)]

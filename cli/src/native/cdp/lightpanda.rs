@@ -11,7 +11,6 @@ use super::discovery::discover_cdp_url_with_timeout;
 const LIGHTPANDA_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTPANDA_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(500);
-const LIGHTPANDA_SESSION_TIMEOUT_SECS: u64 = 604800; // 1 week, the documented maximum
 const MAX_LOG_LINES: usize = 40;
 
 pub struct LightpandaProcess {
@@ -47,8 +46,6 @@ fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
         "127.0.0.1".to_string(),
         "--port".to_string(),
         port.to_string(),
-        "--timeout".to_string(),
-        LIGHTPANDA_SESSION_TIMEOUT_SECS.to_string(),
     ];
 
     if let Some(proxy) = proxy {
@@ -131,7 +128,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         let candidates = [
             home.join(".lightpanda/lightpanda"),
             home.join(".local/bin/lightpanda"),
@@ -237,7 +234,7 @@ async fn wait_for_lightpanda_ready(
     logs: &LaunchLogBuffer,
     startup_timeout: Duration,
 ) -> Result<String, String> {
-    let deadline = crate::rt::Instant::now() + startup_timeout;
+    let deadline = std::time::Instant::now() + startup_timeout;
     let mut last_probe_error = None;
 
     loop {
@@ -246,7 +243,7 @@ async fn wait_for_lightpanda_ready(
             // before we snapshot them.  This is best-effort: lines written just
             // before exit may still be missing, but the most useful output (early
             // startup errors) will already be in the buffer.
-            crate::rt::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
             return Err(lightpanda_launch_error(
                 &format!(
                     "Lightpanda exited before CDP became ready (status: {})",
@@ -264,7 +261,7 @@ async fn wait_for_lightpanda_ready(
             Err(err) => last_probe_error = Some(err),
         }
 
-        if crate::rt::Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             return Err(lightpanda_launch_error(
                 &format!(
                     "Timed out after {}ms waiting for Lightpanda CDP endpoint on port {}",
@@ -276,7 +273,7 @@ async fn wait_for_lightpanda_ready(
             ));
         }
 
-        crate::rt::sleep(LIGHTPANDA_POLL_INTERVAL).await;
+        tokio::time::sleep(LIGHTPANDA_POLL_INTERVAL).await;
     }
 }
 
@@ -355,7 +352,7 @@ mod tests {
         ));
 
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 5"])
+            .args(["-c", "sleep 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -456,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_lightpanda_serve_args_sets_explicit_session_timeout() {
+    fn test_build_lightpanda_serve_args_uses_supported_options() {
         let args = build_lightpanda_serve_args(9222, None);
 
         assert_eq!(
@@ -467,8 +464,6 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9222".to_string(),
-                "--timeout".to_string(),
-                "604800".to_string(),
             ]
         );
     }
@@ -485,8 +480,6 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9333".to_string(),
-                "--timeout".to_string(),
-                "604800".to_string(),
                 "--http_proxy".to_string(),
                 "http://127.0.0.1:8080".to_string(),
             ]
