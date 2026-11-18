@@ -1,0 +1,12 @@
+[package]
+name = "agent-browser-shim-rustls-native-certs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "rustls-native-certs for wasm32 hosts, which have no system trust store"
+
+[lib]
+name = "rustls_native_certs"
+
+[dependencies]
+rustls-pki-types = "1"

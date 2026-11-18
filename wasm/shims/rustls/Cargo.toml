@@ -1,0 +1,12 @@
+[package]
+name = "agent-browser-shim-rustls"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The subset of the rustls API that agent-browser uses to describe trust roots, for wasm32 hosts where the JS host terminates TLS"
+
+[lib]
+name = "rustls"
+
+[dependencies]
+rustls-pki-types = "1"

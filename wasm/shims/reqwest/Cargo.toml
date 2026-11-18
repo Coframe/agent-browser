@@ -1,0 +1,15 @@
+[package]
+name = "agent-browser-shim-reqwest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "reqwest for wasm32 hosts, with the native-only builder options agent-browser uses accepted and ignored"
+
+[lib]
+name = "reqwest"
+
+[dependencies]
+real_reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
+rustls = { package = "agent-browser-shim-rustls", path = "../rustls" }
+url = "2"
+http = "1"

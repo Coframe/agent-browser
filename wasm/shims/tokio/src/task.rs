@@ -129,3 +129,75 @@ pub async fn yield_now() {
     }
     Yield(false).await
 }
+
+/// A set of tasks that are aborted when the set is dropped.
+#[derive(Debug)]
+pub struct JoinSet<T> {
+    tasks: Vec<JoinHandle<T>>,
+}
+
+impl<T> Default for JoinSet<T> {
+    fn default() -> Self {
+        Self { tasks: Vec::new() }
+    }
+}
+
+impl<T: 'static> JoinSet<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn spawn<F>(&mut self, future: F) -> AbortHandle
+    where
+        F: Future<Output = T> + 'static,
+    {
+        let handle = spawn(future);
+        let abort = handle.abort_handle();
+        self.tasks.push(handle);
+        abort
+    }
+
+    /// Waits for the next task to finish. Returns `None` when the set is empty.
+    pub async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
+        if self.tasks.is_empty() {
+            return None;
+        }
+        std::future::poll_fn(|cx| {
+            for index in 0..self.tasks.len() {
+                if let Poll::Ready(result) = Pin::new(&mut self.tasks[index]).poll(cx) {
+                    drop(self.tasks.swap_remove(index));
+                    return Poll::Ready(Some(result));
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub fn abort_all(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.abort_all();
+        while self.join_next().await.is_some() {}
+    }
+}
+
+impl<T> Drop for JoinSet<T> {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}

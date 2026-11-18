@@ -32,7 +32,11 @@ chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
 psl = "=2.1.246"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+reqwest = { package = "agent-browser-shim-reqwest", path = "shims/reqwest" }
+rustls = { package = "agent-browser-shim-rustls", path = "shims/rustls" }
+rustls-native-certs = { package = "agent-browser-shim-rustls-native-certs", path = "shims/rustls-native-certs" }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 tokio = { package = "agent-browser-shim-tokio", path = "shims/tokio" }
 tokio-tungstenite = { package = "agent-browser-shim-tokio-tungstenite", path = "shims/tokio-tungstenite" }
 socket2 = { package = "agent-browser-shim-socket2", path = "shims/socket2" }
@@ -45,4 +49,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [workspace]
-members = [".", "shims/tokio", "shims/tokio-tungstenite", "shims/socket2"]
+members = [".", "shims/*"]
