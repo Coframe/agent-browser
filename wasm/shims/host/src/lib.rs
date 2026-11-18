@@ -1,59 +1,62 @@
 //! The platform layer for agent-browser on wasm32-wasip1.
 //!
 //! WASI covers the clock, environment, files and stdio. It has no event
-//! loop, sockets or HTTP, so the JS host supplies those through the
-//! `agent_browser_host` import module, and reports results by calling the
-//! `ab_*` exports below. The shim crates next to this one (`tokio`,
-//! `tokio-tungstenite`, `reqwest`) are built on it.
+//! loop, sockets, HTTP or processes, so the JS host supplies those through
+//! the `agent_browser_host` import module. The shim crates next to this one
+//! (`tokio`, `tokio-tungstenite`, `reqwest`) are built on it.
 //!
-//! Contract with the host:
+//! The module is synchronous: [`block_on`] polls its future and the spawned
+//! tasks until none can make progress, then calls the `event_wait` import,
+//! which the host suspends until something happened (a timer fired, a
+//! socket received data, a request finished). The host therefore needs
+//! JavaScript Promise Integration, or a module transformed with Asyncify.
 //!
-//! - Wasm runs only while the host is inside an export. Every `ab_*` event
-//!   export runs the executor until no task can make progress.
-//! - The host must not call an export from inside an import. It queues the
-//!   event and delivers it from its own event loop.
-//! - Buffers passed to an import are borrowed for that call. Buffers passed
-//!   to an export are allocated with [`ab_alloc`] and owned by the callee.
+//! An event is `[kind: u8][id: u32 le][payload]`. See [`dispatch`].
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_channel::{mpsc, oneshot};
 use futures_executor::{LocalPool, LocalSpawner};
-use futures_util::task::LocalSpawnExt;
+use futures_util::task::{ArcWake, LocalSpawnExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 mod sys {
     #[link(wasm_import_module = "agent_browser_host")]
     extern "C" {
+        pub fn event_wait() -> usize;
+        pub fn event_read(buffer: *mut u8);
         pub fn timer_set(id: u32, ms: f64);
         pub fn timer_clear(id: u32);
-        pub fn ws_open(
-            id: u32,
-            url: *const u8,
-            url_len: usize,
-            headers: *const u8,
-            headers_len: usize,
-        );
+        pub fn ws_open(id: u32, url: *const u8, url_len: usize, headers: *const u8, headers_len: usize);
         pub fn ws_send(id: u32, text: *const u8, text_len: usize) -> i32;
         pub fn ws_close(id: u32);
-        pub fn fetch_start(
-            id: u32,
-            request: *const u8,
-            request_len: usize,
-            body: *const u8,
-            body_len: usize,
-        );
+        pub fn fetch_start(id: u32, request: *const u8, request_len: usize, body: *const u8, body_len: usize);
         pub fn fetch_abort(id: u32);
+        pub fn tcp_listen(port: u32) -> i32;
+        pub fn tcp_unlisten(port: u32);
+        pub fn tcp_connect(port: u32) -> i32;
+        pub fn conn_write(fd: i32, data: *const u8, data_len: usize) -> i32;
+        pub fn conn_close(fd: i32);
         pub fn process_id() -> u32;
         pub fn process_alive(pid: u32) -> i32;
         pub fn spawn(request: *const u8, request_len: usize) -> u32;
-        pub fn tcp_connect(port: u32) -> i32;
     }
 }
+
+const EVENT_TIMER: u8 = 1;
+const EVENT_WEBSOCKET: u8 = 2;
+const EVENT_FETCH: u8 = 3;
+const EVENT_ACCEPT: u8 = 4;
+const EVENT_CONN: u8 = 5;
+
+type FetchResult = Result<FetchResponse, FetchError>;
 
 thread_local! {
     static POOL: RefCell<LocalPool> = RefCell::new(LocalPool::new());
@@ -61,8 +64,9 @@ thread_local! {
     static NEXT_ID: RefCell<u32> = const { RefCell::new(0) };
     static TIMERS: RefCell<HashMap<u32, oneshot::Sender<()>>> = RefCell::new(HashMap::new());
     static SOCKETS: RefCell<HashMap<u32, mpsc::UnboundedSender<WsEvent>>> = RefCell::new(HashMap::new());
-    static FETCHES: RefCell<HashMap<u32, oneshot::Sender<Result<FetchResponse, FetchError>>>> =
-        RefCell::new(HashMap::new());
+    static FETCHES: RefCell<HashMap<u32, oneshot::Sender<FetchResult>>> = RefCell::new(HashMap::new());
+    static LISTENERS: RefCell<HashMap<u32, mpsc::UnboundedSender<i32>>> = RefCell::new(HashMap::new());
+    static CONNS: RefCell<HashMap<i32, mpsc::UnboundedSender<Vec<u8>>>> = RefCell::new(HashMap::new());
 }
 
 fn next_id() -> u32 {
@@ -73,22 +77,116 @@ fn next_id() -> u32 {
     })
 }
 
-/// Queues `future` on the executor. It first runs on the next [`run`].
+/// Queues `future` on the executor. It runs inside [`block_on`].
 pub fn spawn_local(future: impl Future<Output = ()> + 'static) {
     SPAWNER.with(|spawner| {
         let _ = spawner.spawn_local(future);
     });
 }
 
-/// Runs every task until none can make progress without a host event.
-pub fn run() {
-    POOL.with(|pool| {
-        // A host that breaks the no-reentry rule finds the pool borrowed;
-        // the outer call drains the tasks it woke.
-        if let Ok(mut pool) = pool.try_borrow_mut() {
-            pool.run_until_stalled();
+struct RootWaker(AtomicBool);
+
+impl ArcWake for RootWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Runs `future` to completion, along with every spawned task.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let root = Arc::new(RootWaker(AtomicBool::new(true)));
+    let waker = futures_util::task::waker(root.clone());
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if root.0.swap(false, Ordering::SeqCst) {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
         }
-    });
+        // A nested `block_on` finds the pool borrowed by the outer one and
+        // makes progress on host events alone.
+        POOL.with(|pool| {
+            if let Ok(mut pool) = pool.try_borrow_mut() {
+                pool.run_until_stalled();
+            }
+        });
+        if !root.0.load(Ordering::SeqCst) {
+            dispatch();
+        }
+    }
+}
+
+/// Waits for one host event and hands it to whoever is waiting for it.
+fn dispatch() {
+    let len = unsafe { sys::event_wait() };
+    let mut event = vec![0u8; len];
+    unsafe { sys::event_read(event.as_mut_ptr()) };
+    if event.len() < 5 {
+        return;
+    }
+    let id = u32::from_le_bytes([event[1], event[2], event[3], event[4]]);
+    let payload = &event[5..];
+    match event[0] {
+        EVENT_TIMER => {
+            if let Some(tx) = TIMERS.with(|timers| timers.borrow_mut().remove(&id)) {
+                let _ = tx.send(());
+            }
+        }
+        // payload: [0 open | 1 message | 2 close | 3 error][utf-8 text]
+        EVENT_WEBSOCKET => {
+            let Some((&kind, text)) = payload.split_first() else {
+                return;
+            };
+            let text = String::from_utf8_lossy(text).into_owned();
+            let event = match kind {
+                0 => WsEvent::Open,
+                1 => WsEvent::Message(text),
+                2 => WsEvent::Close((!text.is_empty()).then_some(text)),
+                _ => WsEvent::Error(text),
+            };
+            let last = matches!(event, WsEvent::Close(_) | WsEvent::Error(_));
+            SOCKETS.with(|sockets| {
+                let mut sockets = sockets.borrow_mut();
+                if let Some(tx) = sockets.get(&id) {
+                    let _ = tx.unbounded_send(event);
+                }
+                if last {
+                    sockets.remove(&id);
+                }
+            });
+        }
+        // payload: [status: u32 le][head_len: u32 le][head json][body]
+        // status 0: head is a `FetchError`. Otherwise head is `{ url, headers }`.
+        EVENT_FETCH => {
+            let result = parse_fetch(payload);
+            if let Some(tx) = FETCHES.with(|fetches| fetches.borrow_mut().remove(&id)) {
+                let _ = tx.send(result);
+            }
+        }
+        // id: the listening port. payload: [fd: u32 le] of the accepted connection.
+        EVENT_ACCEPT => {
+            if let Some(fd) = payload.get(..4) {
+                let fd = i32::from_le_bytes([fd[0], fd[1], fd[2], fd[3]]);
+                LISTENERS.with(|listeners| {
+                    if let Some(tx) = listeners.borrow().get(&id) {
+                        let _ = tx.unbounded_send(fd);
+                    }
+                });
+            }
+        }
+        // id: the connection fd. payload: received bytes; empty at end of stream.
+        EVENT_CONN => CONNS.with(|conns| {
+            let mut conns = conns.borrow_mut();
+            let fd = id as i32;
+            if payload.is_empty() {
+                conns.remove(&fd);
+            } else if let Some(tx) = conns.get(&fd) {
+                let _ = tx.unbounded_send(payload.to_vec());
+            }
+        }),
+        _ => {}
+    }
 }
 
 /// Completes after `ms` milliseconds. Dropping it cancels the host timer.
@@ -140,10 +238,7 @@ pub struct WebSocket {
 
 /// Asks the host to open a WebSocket. The first event is [`WsEvent::Open`]
 /// or [`WsEvent::Error`].
-pub fn ws_open(
-    url: &str,
-    headers: &[(String, String)],
-) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
+pub fn ws_open(url: &str, headers: &[(String, String)]) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
     let id = next_id();
     let (tx, events) = mpsc::unbounded();
     SOCKETS.with(|sockets| sockets.borrow_mut().insert(id, tx));
@@ -195,14 +290,44 @@ pub struct FetchError {
     pub timeout: bool,
 }
 
+impl FetchError {
+    fn new(message: impl Into<String>) -> Self {
+        FetchError {
+            message: message.into(),
+            timeout: false,
+        }
+    }
+}
+
 #[derive(Deserialize)]
-struct FetchMeta {
+struct FetchHead {
     url: String,
     headers: Vec<(String, String)>,
 }
 
+fn parse_fetch(payload: &[u8]) -> FetchResult {
+    let malformed = || FetchError::new("malformed response from host");
+    let status = payload.get(..4).ok_or_else(malformed)?;
+    let status = u32::from_le_bytes([status[0], status[1], status[2], status[3]]);
+    let head_len = payload.get(4..8).ok_or_else(malformed)?;
+    let head_len = u32::from_le_bytes([head_len[0], head_len[1], head_len[2], head_len[3]]) as usize;
+    let head = payload.get(8..8 + head_len).ok_or_else(malformed)?;
+    let body = &payload[8 + head_len..];
+    if status == 0 {
+        return Err(serde_json::from_slice::<FetchError>(head)
+            .unwrap_or_else(|_| FetchError::new(String::from_utf8_lossy(head))));
+    }
+    let head: FetchHead = serde_json::from_slice(head).map_err(|_| malformed())?;
+    Ok(FetchResponse {
+        status: status as u16,
+        url: head.url,
+        headers: head.headers,
+        body: body.to_vec(),
+    })
+}
+
 /// Sends an HTTP request through the host and buffers the whole response.
-pub async fn fetch(request: FetchRequest) -> Result<FetchResponse, FetchError> {
+pub async fn fetch(request: FetchRequest) -> FetchResult {
     struct Abort(u32);
     impl Drop for Abort {
         fn drop(&mut self) {
@@ -219,117 +344,99 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchResponse, FetchError> {
     let (tx, done) = oneshot::channel();
     FETCHES.with(|fetches| fetches.borrow_mut().insert(id, tx));
     let _abort = Abort(id);
-    let head = serde_json::to_vec(&request).map_err(|e| FetchError {
-        message: e.to_string(),
-        timeout: false,
-    })?;
+    let head = serde_json::to_vec(&request).map_err(|e| FetchError::new(e.to_string()))?;
     let body = request.body.as_deref().unwrap_or_default();
     unsafe { sys::fetch_start(id, head.as_ptr(), head.len(), body.as_ptr(), body.len()) };
-    done.await.unwrap_or_else(|_| {
-        Err(FetchError {
-            message: "request was dropped by the host".to_string(),
-            timeout: false,
-        })
+    done.await
+        .unwrap_or_else(|_| Err(FetchError::new("request was dropped by the host")))
+}
+
+/// A loopback listener. Instances of this module reach each other through
+/// the host, which stands in for `127.0.0.1`.
+#[derive(Debug)]
+pub struct TcpListener {
+    port: u16,
+    accepted: mpsc::UnboundedReceiver<i32>,
+}
+
+/// Listens on `port`, or on a free port when `port` is 0.
+pub fn tcp_listen(port: u16) -> std::io::Result<TcpListener> {
+    let bound = unsafe { sys::tcp_listen(port as u32) };
+    if bound <= 0 {
+        return Err(std::io::ErrorKind::AddrInUse.into());
+    }
+    let (tx, accepted) = mpsc::unbounded();
+    LISTENERS.with(|listeners| listeners.borrow_mut().insert(bound as u32, tx));
+    Ok(TcpListener {
+        port: bound as u16,
+        accepted,
     })
 }
 
-/// Takes ownership of a buffer the host allocated with [`ab_alloc`].
-unsafe fn take(ptr: *mut u8, len: usize) -> Vec<u8> {
-    if ptr.is_null() || len == 0 {
-        return Vec::new();
+impl TcpListener {
+    pub fn port(&self) -> u16 {
+        self.port
     }
-    Vec::from_raw_parts(ptr, len, len)
-}
 
-#[no_mangle]
-pub extern "C" fn ab_alloc(len: usize) -> *mut u8 {
-    let mut buffer = Vec::<u8>::with_capacity(len.max(1));
-    let ptr = buffer.as_mut_ptr();
-    std::mem::forget(buffer);
-    ptr
-}
-
-#[no_mangle]
-pub extern "C" fn ab_poll() {
-    run();
-}
-
-#[no_mangle]
-pub extern "C" fn ab_timer_fired(id: u32) {
-    if let Some(tx) = TIMERS.with(|timers| timers.borrow_mut().remove(&id)) {
-        let _ = tx.send(());
+    pub fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Conn>> {
+        match self.accepted.poll_next_unpin(cx) {
+            Poll::Ready(Some(fd)) => Poll::Ready(Ok(Conn::adopt(fd))),
+            Poll::Ready(None) => Poll::Ready(Err(std::io::ErrorKind::NotConnected.into())),
+            Poll::Pending => Poll::Pending,
+        }
     }
-    run();
 }
 
-/// `kind`: 0 open, 1 message, 2 close, 3 error. The buffer holds the
-/// message text, the close reason or the error message.
-///
-/// # Safety
-/// `ptr` and `len` must describe a buffer from [`ab_alloc`], or be null/0.
-#[no_mangle]
-pub unsafe extern "C" fn ab_ws_event(id: u32, kind: u32, ptr: *mut u8, len: usize) {
-    let text = String::from_utf8_lossy(&take(ptr, len)).into_owned();
-    let event = match kind {
-        0 => WsEvent::Open,
-        1 => WsEvent::Message(text),
-        2 => WsEvent::Close((!text.is_empty()).then_some(text)),
-        _ => WsEvent::Error(text),
-    };
-    let last = matches!(event, WsEvent::Close(_) | WsEvent::Error(_));
-    SOCKETS.with(|sockets| {
-        let mut sockets = sockets.borrow_mut();
-        if let Some(tx) = sockets.get(&id) {
-            let _ = tx.unbounded_send(event);
-        }
-        if last {
-            sockets.remove(&id);
-        }
-    });
-    run();
-}
-
-/// `status` 0 means the request failed and `meta` is a JSON [`FetchError`].
-/// Otherwise `meta` is JSON `{ url, headers }` and `body` the response body.
-///
-/// # Safety
-/// Both buffers must come from [`ab_alloc`], or be null/0.
-#[no_mangle]
-pub unsafe extern "C" fn ab_fetch_done(
-    id: u32,
-    status: u32,
-    meta: *mut u8,
-    meta_len: usize,
-    body: *mut u8,
-    body_len: usize,
-) {
-    let meta = take(meta, meta_len);
-    let body = take(body, body_len);
-    let result = if status == 0 {
-        Err(
-            serde_json::from_slice::<FetchError>(&meta).unwrap_or_else(|_| FetchError {
-                message: String::from_utf8_lossy(&meta).into_owned(),
-                timeout: false,
-            }),
-        )
-    } else {
-        match serde_json::from_slice::<FetchMeta>(&meta) {
-            Ok(meta) => Ok(FetchResponse {
-                status: status as u16,
-                url: meta.url,
-                headers: meta.headers,
-                body,
-            }),
-            Err(e) => Err(FetchError {
-                message: format!("malformed response from host: {e}"),
-                timeout: false,
-            }),
-        }
-    };
-    if let Some(tx) = FETCHES.with(|fetches| fetches.borrow_mut().remove(&id)) {
-        let _ = tx.send(result);
+impl Drop for TcpListener {
+    fn drop(&mut self) {
+        let _ = LISTENERS.try_with(|listeners| listeners.borrow_mut().remove(&(self.port as u32)));
+        unsafe { sys::tcp_unlisten(self.port as u32) };
     }
-    run();
+}
+
+/// The accepting end of a loopback connection. Received bytes arrive as
+/// host events. Dropping it closes the connection.
+#[derive(Debug)]
+pub struct Conn {
+    fd: i32,
+    received: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl Conn {
+    fn adopt(fd: i32) -> Self {
+        let (tx, received) = mpsc::unbounded();
+        CONNS.with(|conns| conns.borrow_mut().insert(fd, tx));
+        Conn { fd, received }
+    }
+
+    /// The next received bytes, or `None` at end of stream.
+    pub fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Option<Vec<u8>>> {
+        self.received.poll_next_unpin(cx)
+    }
+
+    pub fn write(&self, data: &[u8]) -> std::io::Result<usize> {
+        match unsafe { sys::conn_write(self.fd, data.as_ptr(), data.len()) } {
+            0 => Ok(data.len()),
+            _ => Err(std::io::ErrorKind::BrokenPipe.into()),
+        }
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        let _ = CONNS.try_with(|conns| conns.borrow_mut().remove(&self.fd));
+        unsafe { sys::conn_close(self.fd) };
+    }
+}
+
+/// Connects to a listener that another instance opened on `port`. The
+/// stream is a WASI file descriptor, so it blocks like a native socket.
+pub fn tcp_connect(port: u16) -> std::io::Result<std::net::TcpStream> {
+    use std::os::fd::FromRawFd;
+    match unsafe { sys::tcp_connect(port as u32) } {
+        fd if fd >= 0 => Ok(unsafe { std::net::TcpStream::from_raw_fd(fd) }),
+        _ => Err(std::io::ErrorKind::ConnectionRefused.into()),
+    }
 }
 
 /// The directory for temporary files. `std::env::temp_dir` traps on WASI.
@@ -377,14 +484,5 @@ pub fn spawn(command: &std::process::Command) -> std::io::Result<u32> {
     match unsafe { sys::spawn(request.as_ptr(), request.len()) } {
         0 => Err(std::io::Error::other("the host could not start a process")),
         pid => Ok(pid),
-    }
-}
-
-/// Connects to a listener that another instance opened on `port`.
-pub fn tcp_connect(port: u16) -> std::io::Result<std::net::TcpStream> {
-    use std::os::fd::FromRawFd;
-    match unsafe { sys::tcp_connect(port as u32) } {
-        fd if fd >= 0 => Ok(unsafe { std::net::TcpStream::from_raw_fd(fd) }),
-        _ => Err(std::io::ErrorKind::ConnectionRefused.into()),
     }
 }

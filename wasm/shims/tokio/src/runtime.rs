@@ -1,25 +1,31 @@
-//! There is no tokio runtime on this platform: the host executor drives
-//! every future. Building one returns `io::ErrorKind::Unsupported`.
+//! There is no tokio runtime on this platform: `agent-browser-host` drives
+//! every future. A [`Runtime`] is a handle to it.
 
 use std::future::Future;
 use std::io;
 
-use crate::unsupported;
-
 #[derive(Debug)]
-pub struct Runtime(());
+pub struct Runtime(Handle);
 
 impl Runtime {
     pub fn new() -> io::Result<Self> {
-        Err(unsupported("a tokio runtime"))
+        Ok(Runtime(Handle(())))
     }
 
-    pub fn block_on<F: Future>(&self, _future: F) -> F::Output {
-        unreachable!("a Runtime cannot be built on this platform")
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        agent_browser_host::block_on(future)
     }
 
     pub fn handle(&self) -> &Handle {
-        &Handle(())
+        &self.0
+    }
+
+    pub fn spawn<F>(&self, future: F) -> crate::task::JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        crate::task::spawn(future)
     }
 }
 
@@ -39,12 +45,20 @@ impl Builder {
         self
     }
 
+    pub fn enable_io(&mut self) -> &mut Self {
+        self
+    }
+
+    pub fn enable_time(&mut self) -> &mut Self {
+        self
+    }
+
     pub fn worker_threads(&mut self, _threads: usize) -> &mut Self {
         self
     }
 
     pub fn build(&mut self) -> io::Result<Runtime> {
-        Err(unsupported("a tokio runtime"))
+        Runtime::new()
     }
 }
 
@@ -59,7 +73,6 @@ impl std::fmt::Display for TryCurrentError {
 
 impl std::error::Error for TryCurrentError {}
 
-/// Stands in for the runtime handle. `spawn` uses the host executor.
 #[derive(Clone, Debug)]
 pub struct Handle(());
 
@@ -80,7 +93,7 @@ impl Handle {
         crate::task::spawn(future)
     }
 
-    pub fn block_on<F: Future>(&self, _future: F) -> F::Output {
-        panic!("block_on is not available on this platform")
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        agent_browser_host::block_on(future)
     }
 }
