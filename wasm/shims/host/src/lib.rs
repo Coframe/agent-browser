@@ -31,10 +31,22 @@ mod sys {
     extern "C" {
         pub fn timer_set(id: u32, ms: f64);
         pub fn timer_clear(id: u32);
-        pub fn ws_open(id: u32, url: *const u8, url_len: usize, headers: *const u8, headers_len: usize);
+        pub fn ws_open(
+            id: u32,
+            url: *const u8,
+            url_len: usize,
+            headers: *const u8,
+            headers_len: usize,
+        );
         pub fn ws_send(id: u32, text: *const u8, text_len: usize) -> i32;
         pub fn ws_close(id: u32);
-        pub fn fetch_start(id: u32, request: *const u8, request_len: usize, body: *const u8, body_len: usize);
+        pub fn fetch_start(
+            id: u32,
+            request: *const u8,
+            request_len: usize,
+            body: *const u8,
+            body_len: usize,
+        );
         pub fn fetch_abort(id: u32);
     }
 }
@@ -124,7 +136,10 @@ pub struct WebSocket {
 
 /// Asks the host to open a WebSocket. The first event is [`WsEvent::Open`]
 /// or [`WsEvent::Error`].
-pub fn ws_open(url: &str, headers: &[(String, String)]) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
+pub fn ws_open(
+    url: &str,
+    headers: &[(String, String)],
+) -> (WebSocket, mpsc::UnboundedReceiver<WsEvent>) {
     let id = next_id();
     let (tx, events) = mpsc::unbounded();
     SOCKETS.with(|sockets| sockets.borrow_mut().insert(id, tx));
@@ -287,10 +302,12 @@ pub unsafe extern "C" fn ab_fetch_done(
     let meta = take(meta, meta_len);
     let body = take(body, body_len);
     let result = if status == 0 {
-        Err(serde_json::from_slice::<FetchError>(&meta).unwrap_or_else(|_| FetchError {
-            message: String::from_utf8_lossy(&meta).into_owned(),
-            timeout: false,
-        }))
+        Err(
+            serde_json::from_slice::<FetchError>(&meta).unwrap_or_else(|_| FetchError {
+                message: String::from_utf8_lossy(&meta).into_owned(),
+                timeout: false,
+            }),
+        )
     } else {
         match serde_json::from_slice::<FetchMeta>(&meta) {
             Ok(meta) => Ok(FetchResponse {

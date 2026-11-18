@@ -83,7 +83,9 @@ impl<S: Unpin> Stream for WebSocketStream<S> {
         loop {
             return match self.events.poll_next_unpin(cx) {
                 Poll::Ready(Some(WsEvent::Open)) => continue,
-                Poll::Ready(Some(WsEvent::Message(text))) => Poll::Ready(Some(Ok(Message::Text(text)))),
+                Poll::Ready(Some(WsEvent::Message(text))) => {
+                    Poll::Ready(Some(Ok(Message::Text(text))))
+                }
                 Poll::Ready(Some(WsEvent::Close(reason))) => {
                     Poll::Ready(Some(Ok(Message::Close(reason.map(|reason| {
                         tungstenite::protocol::CloseFrame {
@@ -92,7 +94,9 @@ impl<S: Unpin> Stream for WebSocketStream<S> {
                         }
                     })))))
                 }
-                Poll::Ready(Some(WsEvent::Error(message))) => Poll::Ready(Some(Err(io_error(message)))),
+                Poll::Ready(Some(WsEvent::Error(message))) => {
+                    Poll::Ready(Some(Err(io_error(message))))
+                }
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             };
@@ -169,14 +173,18 @@ where
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
-        .filter_map(|(name, value)| Some((name.as_str().to_string(), value.to_str().ok()?.to_string())))
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
         .collect();
     let (socket, mut events) = agent_browser_host::ws_open(&request.uri().to_string(), &headers);
     match events.next().await {
         Some(WsEvent::Open) => {}
         Some(WsEvent::Error(message)) => return Err(io_error(message)),
         Some(WsEvent::Close(reason)) => {
-            return Err(io_error(reason.unwrap_or_else(|| "connection closed".to_string())))
+            return Err(io_error(
+                reason.unwrap_or_else(|| "connection closed".to_string()),
+            ))
         }
         Some(WsEvent::Message(_)) | None => return Err(io_error("connection failed")),
     }

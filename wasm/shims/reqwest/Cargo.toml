@@ -3,16 +3,19 @@ name = "agent-browser-shim-reqwest"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "reqwest for wasm32 hosts, with the native-only builder options agent-browser uses accepted and ignored"
+description = "The subset of the reqwest API that agent-browser uses, over the JS host's fetch, for wasm32-wasip1"
 
 [lib]
 name = "reqwest"
 
 [dependencies]
-real_reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
+agent-browser-host = { path = "../host" }
 rustls = { package = "agent-browser-shim-rustls", path = "../rustls" }
 http = "1"
+url = "2"
 bytes = "1"
 futures-util = "0.3"
-send_wrapper = { version = "0.6", features = ["futures"] }
 serde = "1"
+serde_json = "1"
+serde_urlencoded = "0.7"
+base64 = "0.22"
