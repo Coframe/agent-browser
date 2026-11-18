@@ -34,7 +34,7 @@ The engine must support JavaScript Promise Integration (`WebAssembly.Suspending`
 <tr><td><code>host/index.mjs</code></td><td>The JavaScript host: WASI preview 1 over an in-memory file system, and the imports above.</td></tr>
 </table>
 
-The process model is upstream's. Each invocation is a short-lived instance of the module. The daemon is a long-lived instance that the first invocation of a session starts, and the two talk over a loopback connection that the host carries. Native-only commands, such as launching a local Chrome, fail with the error the CLI gives when the operating system refuses.
+The process model is upstream's. Each invocation is a short-lived instance of the module. The daemon is a long-lived instance that the first invocation of a session starts, and the two talk over a loopback connection that the host carries. Commands that need a local operating system do not work. Without a CDP endpoint, `open` exits 1 with the CLI's "Chrome not found" error. `install` panics in upstream code for an unsupported platform, which aborts the instance: `run` returns exit code 134 with the panic message on stderr. Other native-only commands have not been surveyed.
 
 ## Build and test
 
