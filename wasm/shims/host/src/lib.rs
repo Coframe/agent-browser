@@ -48,6 +48,10 @@ mod sys {
             body_len: usize,
         );
         pub fn fetch_abort(id: u32);
+        pub fn process_id() -> u32;
+        pub fn process_alive(pid: u32) -> i32;
+        pub fn spawn(request: *const u8, request_len: usize) -> u32;
+        pub fn tcp_connect(port: u32) -> i32;
     }
 }
 
@@ -326,4 +330,61 @@ pub unsafe extern "C" fn ab_fetch_done(
         let _ = tx.send(result);
     }
     run();
+}
+
+/// The directory for temporary files. `std::env::temp_dir` traps on WASI.
+pub fn temp_dir() -> std::path::PathBuf {
+    std::env::var_os("TMPDIR")
+        .filter(|dir| !dir.is_empty())
+        .map(Into::into)
+        .unwrap_or_else(|| "/tmp".into())
+}
+
+/// The path this module was started as, from `argv[0]`.
+pub fn current_exe() -> std::path::PathBuf {
+    std::env::args_os()
+        .next()
+        .map(Into::into)
+        .unwrap_or_else(|| "agent-browser".into())
+}
+
+/// The id the host gave this instance. `std::process::id` traps on WASI.
+pub fn process_id() -> u32 {
+    unsafe { sys::process_id() }
+}
+
+pub fn process_alive(pid: u32) -> bool {
+    unsafe { sys::process_alive(pid) != 0 }
+}
+
+/// Starts another instance of this module with the arguments and
+/// environment of `command`, and returns its process id.
+pub fn spawn(command: &std::process::Command) -> std::io::Result<u32> {
+    let args: Vec<String> = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let env: Vec<(String, String)> = command
+        .get_envs()
+        .filter_map(|(key, value)| {
+            Some((
+                key.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    let request = serde_json::to_vec(&(args, env)).map_err(std::io::Error::other)?;
+    match unsafe { sys::spawn(request.as_ptr(), request.len()) } {
+        0 => Err(std::io::Error::other("the host could not start a process")),
+        pid => Ok(pid),
+    }
+}
+
+/// Connects to a listener that another instance opened on `port`.
+pub fn tcp_connect(port: u16) -> std::io::Result<std::net::TcpStream> {
+    use std::os::fd::FromRawFd;
+    match unsafe { sys::tcp_connect(port as u32) } {
+        fd if fd >= 0 => Ok(unsafe { std::net::TcpStream::from_raw_fd(fd) }),
+        _ => Err(std::io::ErrorKind::ConnectionRefused.into()),
+    }
 }

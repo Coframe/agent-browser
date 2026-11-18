@@ -936,11 +936,6 @@ fn which_exists(cmd: &str) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = cmd;
-        false
-    }
 }
 
 fn package_exists_apt(pkg: &str) -> bool {

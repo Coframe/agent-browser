@@ -1,16 +1,19 @@
 [package]
-name = "agent-browser-wasm-core"
-version = "0.43.0"
+name = "agent-browser-wasm"
+version = "0.0.0"
 edition = "2021"
-description = "agent-browser compiled for wasm32-wasip1 hosts such as Cloudflare Workers"
+description = "agent-browser built for wasm32-wasip1 hosts such as Cloudflare Workers"
 license = "Apache-2.0"
 publish = false
-build = "../cli/build.rs"
+build = "build.rs"
 
-[lib]
-name = "agent_browser"
-path = "src/lib.rs"
+[[bin]]
+name = "agent-browser"
+path = "src/main.rs"
 
+# Mirrors [dependencies] in ../cli/Cargo.toml. build.rs fails when the two
+# lists name different crates. Crates that need an OS are replaced by the
+# shims in ./shims under the same name, so upstream sources compile unchanged.
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -32,19 +35,26 @@ chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
 psl = "=2.1.246"
-reqwest = { package = "agent-browser-shim-reqwest", path = "shims/reqwest" }
-rustls = { package = "agent-browser-shim-rustls", path = "shims/rustls" }
-rustls-native-certs = { package = "agent-browser-shim-rustls-native-certs", path = "shims/rustls-native-certs" }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 tokio = { package = "agent-browser-shim-tokio", path = "shims/tokio" }
 tokio-tungstenite = { package = "agent-browser-shim-tokio-tungstenite", path = "shims/tokio-tungstenite" }
+reqwest = { package = "agent-browser-shim-reqwest", path = "shims/reqwest" }
+rustls = { package = "agent-browser-shim-rustls", path = "shims/rustls" }
+rustls-native-certs = { package = "agent-browser-shim-rustls-native-certs", path = "shims/rustls-native-certs" }
 socket2 = { package = "agent-browser-shim-socket2", path = "shims/socket2" }
 agent-browser-host = { path = "shims/host" }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
 
 [workspace]
 members = [".", "shims/*"]
