@@ -173,6 +173,12 @@ where
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
+        // The host writes the handshake headers itself.
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            !matches!(name, "host" | "connection" | "upgrade")
+                && !name.starts_with("sec-websocket-")
+        })
         .filter_map(|(name, value)| {
             Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
         })
