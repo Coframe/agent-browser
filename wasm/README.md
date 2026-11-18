@@ -22,6 +22,12 @@ const { exitCode, stdout, stderr } = await browser.run(["snapshot", "-i"]);
 
 `run` takes the arguments of one `agent-browser` invocation and returns what the CLI printed. Files the module writes, such as screenshots, land in `browser.fs`, an in-memory file system. `browser.fs.drainChanges()` lists what was written since the last call.
 
+### Keep the session in a Durable Object
+
+A session is a daemon instance that lives in memory between invocations, with its CDP connection. In Cloudflare Workers, create the `createAgentBrowser` object in a Durable Object and send each command to that object. A plain Worker cannot keep it in module scope: workerd does not let one request wake work that another request started, so the second command hangs and the runtime cancels the request. A plain Worker can still run a whole script of commands inside one request.
+
+When the Durable Object is evicted, the daemon and the in-memory file system go with it. The next command starts a new daemon and reconnects to the browser, where the page is as it was. Element refs from earlier snapshots fail with `Unknown ref` until a new `snapshot`. Copy files you need out of `browser.fs` as they are written.
+
 The engine must support JavaScript Promise Integration (`WebAssembly.Suspending`). workerd and Node.js 24 do.
 
 ## How it works
@@ -46,7 +52,7 @@ cargo build --release --target wasm32-wasip1
 pnpm test
 ```
 
-The tests need Chrome. Set `CHROME_PATH` when it is not in a standard location. They run one command script in Node.js and in workerd, and compare both with the native binary when `AGENT_BROWSER_NATIVE` names one:
+The tests need Chrome. Set `CHROME_PATH` when it is not in a standard location. They run one command script in Node.js, in a workerd request, and one command per request in a workerd Durable Object, and compare all three with the native binary when `AGENT_BROWSER_NATIVE` names one:
 
 ```bash
 (cd ../cli && cargo build)

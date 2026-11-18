@@ -118,10 +118,11 @@ test("serves bundled skills", async () => {
   assert.equal(result.stdout.trim(), skills["core/SKILL.md"].trim());
 });
 
-test("runs in workerd with the same output as in Node.js", async () => {
+async function startWorker() {
   const { Miniflare } = await import("miniflare");
-  const miniflare = new Miniflare({
+  return new Miniflare({
     compatibilityDate: "2026-05-01",
+    durableObjects: { BROWSER: "BrowserSession" },
     modules: [
       { type: "ESModule", path: "worker.mjs", contents: readFileSync(join(root, "test/worker.mjs"), "utf8") },
       { type: "ESModule", path: "host.mjs", contents: readFileSync(join(root, "host/index.mjs"), "utf8") },
@@ -129,14 +130,40 @@ test("runs in workerd with the same output as in Node.js", async () => {
       { type: "Text", path: "skills.json", contents: JSON.stringify(skills) },
     ],
   });
+}
+
+async function post(miniflare, body) {
+  const response = await miniflare.dispatchFetch("http://worker/", { method: "POST", body: JSON.stringify(body) });
+  assert.equal(response.status, 200, await response.clone().text());
+  return response.json();
+}
+
+test("runs in workerd with the same output as in Node.js", async () => {
+  const miniflare = await startWorker();
   const chrome = await startChrome();
   try {
-    const response = await miniflare.dispatchFetch("http://worker/", {
-      method: "POST",
-      body: JSON.stringify({ cdp: chrome.cdp, script, cwd: CWD }),
-    });
-    assert.equal(response.status, 200, await response.clone().text());
-    const { results, files } = await response.json();
+    const { results, files } = await post(miniflare, { cdp: chrome.cdp, script, cwd: CWD });
+    const context = { site: site.url, home: HOME };
+
+    assert.deepEqual(byCommand(results, context), byCommand(nodeResults, context));
+    assert.ok(files.some(([path, size]) => path === `${CWD}/shot.png` && size > 1000));
+  } finally {
+    chrome.stop();
+    await miniflare.dispose();
+  }
+});
+
+test("keeps a session in a Durable Object, one command per request", async () => {
+  const miniflare = await startWorker();
+  const chrome = await startChrome();
+  try {
+    const results = [];
+    const files = [];
+    for (const argv of script) {
+      const response = await post(miniflare, { cdp: chrome.cdp, argv, cwd: CWD });
+      results.push(response.result);
+      files.push(...response.files);
+    }
     const context = { site: site.url, home: HOME };
 
     assert.deepEqual(byCommand(results, context), byCommand(nodeResults, context));
