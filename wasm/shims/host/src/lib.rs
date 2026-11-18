@@ -44,6 +44,7 @@ mod sys {
         pub fn tcp_connect(port: u32) -> i32;
         pub fn conn_write(fd: i32, data: *const u8, data_len: usize) -> i32;
         pub fn conn_close(fd: i32);
+        pub fn file_lock(fd: i32) -> i32;
         pub fn process_id() -> u32;
         pub fn process_alive(pid: u32) -> i32;
         pub fn spawn(request: *const u8, request_len: usize) -> u32;
@@ -484,5 +485,16 @@ pub fn spawn(command: &std::process::Command) -> std::io::Result<u32> {
     match unsafe { sys::spawn(request.as_ptr(), request.len()) } {
         0 => Err(std::io::Error::other("the host could not start a process")),
         pid => Ok(pid),
+    }
+}
+
+/// Takes an exclusive lock on `file`, waiting for other instances to
+/// release theirs. The host releases it when the file is closed. WASI has
+/// no file locks, so `File::lock` fails there.
+pub fn lock_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    match unsafe { sys::file_lock(file.as_raw_fd()) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::other("the host could not lock the file")),
     }
 }

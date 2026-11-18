@@ -37,22 +37,23 @@ enum Edit {
 
 /// What the wasm32-wasip1 build changes in upstream sources, and why.
 const EDITS: &[Edit] = &[
-    // std traps on these two calls on WASI.
+    // std traps in these two functions on WASI. The patterns have no
+    // parentheses so they also match a use as a function value.
     Edit::Everywhere {
-        from: "std::env::temp_dir()",
-        to: "agent_browser_host::temp_dir()",
+        from: "std::env::temp_dir",
+        to: "agent_browser_host::temp_dir",
     },
     Edit::Everywhere {
-        from: "env::temp_dir()",
-        to: "agent_browser_host::temp_dir()",
+        from: "env::temp_dir",
+        to: "agent_browser_host::temp_dir",
     },
     Edit::Everywhere {
-        from: "std::process::id()",
-        to: "agent_browser_host::process_id()",
+        from: "std::process::id",
+        to: "agent_browser_host::process_id",
     },
     Edit::Everywhere {
-        from: "process::id()",
-        to: "agent_browser_host::process_id()",
+        from: "process::id",
+        to: "agent_browser_host::process_id",
     },
     // The package version is this crate's, not upstream's.
     Edit::Everywhere {
@@ -116,6 +117,13 @@ const EDITS: &[Edit] = &[
         from: "    #[cfg(windows)]\n    {\n        fs::write(path, contents)\n    }",
         to: "    #[cfg(not(unix))]\n    {\n        fs::write(path, contents)\n    }",
     },
+    // `signal::ctrl_c` never completes in the tokio shim. Without an arm the
+    // function returns at once and the daemon shuts down.
+    Edit::Replace {
+        file: "native/daemon.rs",
+        from: "    #[cfg(windows)]\n    {\n        if let Err(e) = signal::ctrl_c().await {",
+        to: "    #[cfg(not(unix))]\n    {\n        if let Err(e) = signal::ctrl_c().await {",
+    },
     // Functions whose body is one `cfg(unix)` arm and one `cfg(windows)`
     // arm get a third arm. Sockets and processes come from the host.
     Edit::After {
@@ -133,6 +141,13 @@ const EDITS: &[Edit] = &[
         anchor: "            .map(Connection::Tcp)\n            .map_err(|e| format!(\"Failed to connect: {}\", e))\n    }\n",
         text: "    #[cfg(not(any(unix, windows)))]\n    {\n        let port = resolve_port(session)\n            .ok_or_else(|| \"Failed to connect: daemon has not written its port\".to_string())?;\n        agent_browser_host::tcp_connect(port)\n            .map(Connection::Tcp)\n            .map_err(|e| format!(\"Failed to connect: {}\", e))\n    }\n",
     },
+    // WASI has no file locks. The host provides one that it releases when
+    // the file is closed.
+    Edit::Replace {
+        file: "connection.rs",
+        from: "        file.lock()\n            .map_err(|e| format!(\"Failed to lock session {}: {}\", session, e))?;",
+        to: "        agent_browser_host::lock_file(&file)\n            .map_err(|e| format!(\"Failed to lock session {}: {}\", session, e))?;",
+    },
     // `current_exe` is unsupported on WASI, and the daemon is a second
     // instance of this module that the host starts.
     Edit::Replace {
@@ -143,7 +158,7 @@ const EDITS: &[Edit] = &[
     Edit::After {
         file: "connection.rs",
         anchor: "                .map_err(|e| format!(\"Failed to start daemon: {}\", e))?,\n        );\n    }\n\n    let spawned_pid",
-        text: " = {\n        #[cfg(not(any(unix, windows)))]\n        {\n            let mut cmd = Command::new(&exe_path);\n            cmd.env(\"AGENT_BROWSER_DAEMON\", \"1\");\n            apply_daemon_env(&mut cmd, session, opts);\n            agent_browser_host::spawn(&cmd).map_err(|e| format!(\"Failed to start daemon: {}\", e))?;\n        }\n        daemon_child.as_ref().map(|child| child.id())\n    };\n    let _",
+        text: " = {\n        let mut cmd = Command::new(&exe_path);\n        cmd.env(\"AGENT_BROWSER_DAEMON\", \"1\");\n        apply_daemon_env(&mut cmd, session, opts);\n        let pid = agent_browser_host::spawn(&cmd)\n            .map_err(|e| format!(\"Failed to start daemon: {}\", e))?;\n        Some(pid)\n    };\n    let _",
     },
     Edit::After {
         file: "install.rs",
