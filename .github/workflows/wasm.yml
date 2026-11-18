@@ -1,0 +1,48 @@
+name: wasm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: wasm/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install test dependencies
+        working-directory: wasm
+        run: pnpm install --frozen-lockfile
+      - name: Check that no std function that traps on WASI is linked
+        working-directory: wasm
+        run: |
+          cargo build --profile guard --target wasm32-wasip1
+          pnpm run check:traps
+      - name: Build the native binary to compare with
+        working-directory: cli
+        run: cargo build
+      - name: Build the module
+        working-directory: wasm
+        run: cargo build --release --target wasm32-wasip1
+      - name: Test in Node.js and workerd, and against the native binary
+        working-directory: wasm
+        env:
+          AGENT_BROWSER_NATIVE: ${{ github.workspace }}/cli/target/debug/agent-browser
+        run: pnpm test
+      - name: Package
+        working-directory: wasm
+        run: pnpm run package --build ${{ github.run_number }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-browser-wasm
+          path: wasm/dist/*.tgz
